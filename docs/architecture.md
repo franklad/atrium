@@ -49,51 +49,62 @@ be anything that speaks MCP and reads a `config.yaml`.
 ## 2. Topology (goal-1 state)
 
 Atrium is **private-mesh-first**: ingress lives on a single-tenant overlay
-network, not on the public internet. The principle is "no public surface."
-Tailscale is the default implementation (zero-cost TLS via `.ts.net`,
-MagicDNS, ACL out of the box); the principle is what's baked in, the
-implementation is a sensible default. Swapping in self-hosted Headscale
-preserves the model exactly; other private meshes (Nebula, Innernet,
-ZeroTier) are a future seam (§8). Public-internet ingress
-(Cloudflare Tunnel, public DNS + LE certs) is an explicit non-goal — it
-contradicts the single-tenant thesis.
+network, not on the public internet. The principle is *no public
+services* — the IPs that serve traffic are mesh-only routable. Tailscale
+is the default mesh implementation (Headscale is a drop-in alternative;
+other meshes — Nebula, Innernet, ZeroTier — are a future seam, §8).
+Public-internet ingress (Cloudflare Tunnel, internet-facing LoadBalancers)
+is an explicit non-goal — it contradicts the single-tenant thesis.
+
+DNS is the one place we *do* use public infrastructure, and it's
+intentional. Public DNS publishes `<host>.<your-domain>` as an A record
+to the node's **mesh address** (e.g. a Tailscale CGNAT 100.x.y.z). The
+DNS answer is public; the IP it resolves to is private — only mesh
+members can route to it. Non-members get the DNS answer, attempt the
+connection, and time out. This shape gives us standard LE certs over
+DNS-01 (no service ever needs to be publicly reachable for cert
+validation) and avoids browser DNS-over-HTTPS interop pain (DoH bypasses
+the OS resolver, so MagicDNS-style private resolution silently breaks
+in modern browsers).
 
 ```
-                  ┌─ operator's mesh member (laptop, phone) ────┐
-                  │                                            │
-                  ▼                                            │
-        https://hermes.<tailnet>.ts.net                        │
-              │  (MagicDNS; NXDOMAIN to non-members)           │
-              │  TLS terminated by Tailscale (auto LE cert)    │
-              ▼                                                │
-        Tailscale Operator proxy pod  (ts-hermes-<hash>)       │
-              │                                                │
-              │  plaintext HTTP                                │
-              ▼                                                │
-        Service/hermes-dashboard  (ClusterIP :9119)            │
-              │                                                │
-              ▼                                                │
-        Pod: hermes  (single replica)                          │
-        ├── command: hermes dashboard --host 0.0.0.0 ...       │
-        ├── /opt/data            (PVC, ~/.hermes)              │
-        ├── /opt/skills-overlay  (empty)                       │
-        └── envFrom: hermes-env  (Secret absent / empty)       │
-                                                               │
-        (no provider configured; chat tab errors on use;       │
-         dashboard SPA, sessions/jobs/metrics tabs render)     │
-                                                               ◄
+              ┌─ operator's mesh member (laptop, phone) ──────┐
+              │                                              │
+              ▼                                              │
+    https://hermes.<your-domain>                             │
+          │  (public DNS A record → node's mesh IP)          │
+          │  IP only routable from mesh members              │
+          ▼                                                  │
+    k3s Traefik :443  (binds node's mesh IP via ServiceLB)   │
+          │  Host: hermes.<your-domain>                      │
+          │  TLS: wildcard-tls (cert-manager + LE DNS-01)    │
+          ▼                                                  │
+    Service/hermes-dashboard  (ClusterIP :9119)              │
+          │                                                  │
+          ▼                                                  │
+    Pod: hermes  (single replica)                            │
+    ├── command: /opt/hermes/.venv/bin/hermes dashboard      │
+    │     --host 0.0.0.0 --port 9119 --no-open --insecure   │
+    ├── /opt/data            (PVC, ~/.hermes)                │
+    └── envFrom: hermes-env  (Secret absent / empty)         │
+                                                             │
+    (no provider configured; chat tab errors on use;         │
+     dashboard SPA, sessions/jobs/metrics tabs render)       │
+                                                             ◄
 ```
 
-Single node. Single tenant. Everything south of the mesh ingress proxy is
-unencrypted plaintext — TLS lives at the mesh edge.
-**The trust boundary is the private mesh.** No public DNS. No public
-services. No public anything.
+Single node. Single tenant. Everything south of the node's mesh edge is
+unencrypted plaintext between k8s services — TLS lives at the Traefik
+ingress. **The trust boundary is the private mesh.** Public DNS leaks
+"hostname → private IP"; that's useless to anyone outside the mesh.
 
 What's intentionally absent at goal 1:
-- No Traefik routing (k3s ships it; we don't use it yet — see §8).
-- No cert-manager / wildcard cert / Cloudflare API token.
-- No Flux. Plain `kubectl apply -k`.
-- No provider keys, OAuth tokens, or app pods.
+- No Flux. Plain kustomize+envsubst render via `scripts/apply.sh`.
+- No image automation (manual SHA tag bumps).
+- No app pods (gustus, pantry, future MCP skills — all goal 2).
+- No provider keys, OAuth tokens, or active chat surface.
+- No SOPS-encrypted Secrets in git (age key pre-seeded for goal 2;
+  Cloudflare token created out-of-band; provider Secrets are TBD).
 
 ---
 
@@ -107,36 +118,52 @@ atrium/
 ├── .gitignore                      Ignores cluster.config.yaml + age key + secrets.
 │
 ├── deploy/
-│   └── hermes/                     Goal-1 kustomize bundle. Applied via kubectl.
+│   ├── platform/                   Cluster-wide infra (cert-manager Issuer + wildcard cert).
+│   │   ├── cluster-issuer.yaml     ClusterIssuer letsencrypt-prod w/ Cloudflare DNS-01
+│   │   ├── wildcard-cert.yaml      Certificate *.${CLUSTER_DOMAIN}
+│   │   └── kustomization.yaml
+│   └── hermes/                     Hermes deploy bundle.
 │       ├── 00-namespace.yaml
 │       ├── 10-pvc.yaml
 │       ├── 20-config.yaml          Provider-less Hermes config (ConfigMap)
 │       ├── 40-deployment.yaml      ServiceAccount + Hermes Deployment
-│       ├── 50-service.yaml         ClusterIP + mesh-ingress annotations
+│       ├── 50-service.yaml         ClusterIP for the dashboard
+│       ├── 60-ingress.yaml         Traefik Ingress on ${HERMES_HOSTNAME}.${CLUSTER_DOMAIN}
 │       ├── SOUL.md                 The agent's voice; rendered into the hermes-soul ConfigMap at kustomize build time
 │       └── kustomization.yaml
+│
+├── scripts/
+│   └── apply.sh                    Reads cluster.config.yaml, renders templates via envsubst, applies.
 │
 ├── docs/
 │   └── architecture.md             This file. The only doc until goal 2.
 │
 └── (goal-2 seams, NOT present yet — listed for clarity)
-    ├── platform/                   Will appear when Flux lands (§8)
-    │   ├── clusters/default/
-    │   ├── infrastructure/
-    │   └── apps/
-    ├── contracts/                  SKILL.md schema + network/ingress contracts
-    ├── scripts/                    install-k3s.sh, render-config.sh, doctor.sh
-    └── Taskfile.yml                `task bootstrap`, `task doctor`, etc.
+    ├── platform/clusters/default/  Flux root, lands when Flux returns at goal 2 (§8)
+    ├── platform/infrastructure/    Flux-managed infra additions
+    ├── platform/apps/              Flux pointers to per-app repos
+    └── contracts/                  SKILL.md schema + network/ingress contracts
 ```
+
+### Two-bundle layout
+
+`deploy/platform/` and `deploy/hermes/` are separate kustomize bundles
+because they have different change cadences: platform infra (issuers,
+wildcard certs, future cluster-scoped wiring) churns rarely; the Hermes
+deploy churns with image bumps and config tweaks. The `scripts/apply.sh`
+applies them in order — platform first, hermes second — so the wildcard
+cert exists before the Ingress references its Secret.
 
 ### Why each top-level entry exists
 
 | Entry | Why |
 |---|---|
-| `cluster.config.yaml` (gitignored) | One file is the difference between a platform and a snapshot. Everything host-specific lives here — domain, tailnet name, node hostname, GitHub owner, age recipient, *and* the active model provider config. Gitignored because it carries identity, not because it's secret in the SOPS sense. |
+| `cluster.config.yaml` (gitignored) | One file is the difference between a platform and a snapshot. Everything host-specific lives here — domain, mesh suffix, node hostname, age recipient, ACME email, active model provider config. Gitignored because it carries identity, not because it's secret in the SOPS sense. Templates reference its values via `${CLUSTER_DOMAIN}`, `${HERMES_HOSTNAME}`, `${ACME_EMAIL}`; `scripts/apply.sh` does the substitution at install time. |
 | `cluster.config.example.yaml` (checked in) | The template. Includes commented-out blocks for every supported provider+auth combination. A stranger cloning the repo sees the shape immediately. |
+| `scripts/apply.sh` | The install command. Reads `cluster.config.yaml`, exports its values as env vars, runs `kubectl kustomize <dir> \| envsubst \| kubectl apply -f -` for `deploy/platform/` then `deploy/hermes/`. Prereqs: yq, envsubst, kubectl. |
+| `deploy/platform/` | Cluster-wide infra: cert-manager `ClusterIssuer` (Let's Encrypt prod, Cloudflare DNS-01) + wildcard `Certificate` for `*.${CLUSTER_DOMAIN}`. cert-manager itself is installed once via Helm — see §6.7. |
+| `deploy/hermes/` | The Hermes deploy. Provider-less ConfigMap, Deployment running `hermes dashboard`, Service, Traefik Ingress. |
 | `deploy/hermes/SOUL.md` (committed) | The agent's voice and character — direct, decisive, serves the mission. One good default that ships with the repo; fork and edit if you want a different voice. Rendered into the `hermes-soul` ConfigMap by the kustomize `configMapGenerator`. Operator-configurable SOUL (without forking) is a goal-2+ seam (§8). |
-| `deploy/hermes/` | The goal-1 payload. Four manifests in a kustomize bundle. Flat structure on purpose — `platform/clusters/default/` lands when Flux lands. |
 | `docs/architecture.md` | Why the system is what it is. One file. |
 
 ### What atrium does *not* contain
@@ -326,54 +353,57 @@ this.
 ## 5. Goal 1: what we're shipping
 
 The smallest atrium that does something real: **k3s on a single node,
-Hermes pod running, dashboard reachable over tailnet at
-`https://hermes.<tailnet>.ts.net` with a valid TLS cert, dashboard SPA
-renders, sessions/jobs/metrics tabs render (with empty data), no provider
-configured, no apps.**
+Hermes pod running, dashboard reachable from mesh members at
+`https://hermes.<your-domain>` with a valid LE wildcard cert, SPA renders
+in any browser (no DoH workarounds), sessions/jobs/metrics tabs render
+with empty data, no provider configured, no apps.**
 
 ### Success criteria
 
-A goal-1 install is done when, from a tailnet-connected workstation:
+A goal-1 install is done when, from a mesh-connected workstation:
 
-1. `curl -I https://hermes.<tailnet>.ts.net` returns `HTTP/2 200` with a
-   valid Let's Encrypt cert (no `-k` flag).
-2. A browser at the same URL renders the Hermes dashboard SPA.
-3. The sessions, jobs, and metrics tabs render. Empty data is fine — chat
-   is goal 2.
-4. `kubectl -n hermes get pods` shows `hermes-<hash> 1/1 Running` with no
-   restarts.
-5. `kubectl -n hermes logs deploy/hermes` shows clean dashboard startup, no
-   `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` errors, no panics.
+1. `curl -I https://hermes.<your-domain>` returns `HTTP/2` with a valid
+   Let's Encrypt cert (no `-k` flag).
+2. A browser at the same URL renders the Hermes dashboard SPA with a
+   green lock icon. Works in Chromium-based browsers (Arc, Chrome, Edge,
+   Brave) with DoH on — the DNS name is publicly resolvable, the IP is
+   mesh-only routable.
+3. The sessions / jobs / metrics / logs tabs render. Empty data is fine.
+4. `kubectl -n hermes get pods` shows `hermes-<hash> 1/1 Running` with
+   no restarts.
+5. `kubectl -n hermes logs deploy/hermes` shows clean dashboard startup.
+   Auxiliary-provider warnings (openrouter / Nous "unhealthy for 60s")
+   are *expected* with no provider configured — they're not errors.
 
 ### What's in
 
-- k3s `v1.36.0+k3s1` (current latest stable) on a single node (reference
-  hardware: Ubuntu 24.04, ~4 GB RAM, 4 vCPU — atrium has been validated at
-  this size; larger is fine).
-- Tailscale Operator (HelmRelease applied via `kubectl apply` from upstream
-  manifests).
-- Hermes Deployment, ConfigMap (provider-less `config.yaml`), ConfigMap
-  (`SOUL.md`), PVC, Service.
-- Tailscale Operator exposes the Hermes dashboard Service as a tailnet
-  device at `hermes.<tailnet>.ts.net`. Tailscale handles TLS via its built-in
-  Let's Encrypt cert provisioning for `.ts.net` names.
-- SOPS age private key installed into `flux-system` namespace (unused at
-  goal 1; pre-seeded so goal 2 doesn't re-discover the requirement).
+- k3s `v1.36.0+k3s1` on a single node (reference hardware: Ubuntu 24.04,
+  ~4 GB RAM, 4 vCPU — atrium is validated at this size; larger is fine).
+- Tailscale Operator (Helm-installed; provides outbound device identity
+  in goal 2 but isn't on the goal-1 ingress path).
+- cert-manager (Helm-installed) with a `letsencrypt-prod` ClusterIssuer
+  using Cloudflare DNS-01, plus a wildcard Certificate for
+  `*.<your-domain>` issued into the `hermes` namespace.
+- k3s' bundled Traefik fronts the dashboard via a standard Ingress.
+- Hermes Deployment (provider-less `config.yaml`), Service, Ingress, PVC,
+  `hermes-soul` ConfigMap (generated from `deploy/hermes/SOUL.md`).
+- A public DNS A record `hermes.<your-domain> → <node's mesh IP>` (e.g.
+  the node's Tailscale CGNAT 100.x.y.z). The IP is mesh-only routable.
+- SOPS age private key pre-seeded into `flux-system/sops-age` (unused at
+  goal 1; future-proofs goal 2 SOPS adoption).
 
 ### What's out (explicitly deferred to goal 2 or later)
 
 | Thing | Why deferred |
 |---|---|
-| Any model provider key or OAuth flow | The whole point of goal 1 — see §4. |
-| Flux GitOps (source, kustomize, helm, image-reflector, image-automation controllers) | A 6-controller, ~400 MB dependency. Payoff (reconcile, image automation, SOPS) is wasted on a 4-manifest deploy. Returns in goal 2 with multi-app payload. |
-| cert-manager + Cloudflare DNS-01 + `*.<domain>` wildcard | Tailscale's `.ts.net` cert is the goal-1 TLS story. Wildcard returns in goal 2 when the cluster has multiple ingresses. |
-| Traefik IngressRoute + middleware (basic-auth, redirect) | Traefik ships with k3s and sits idle. We expose Hermes via a tailnet-annotated Service directly. Traefik returns in goal 2 for host-based routing across apps. |
+| Any model provider key or OAuth flow | The whole point of goal 1 — see §4. Active chat needs a provider. |
+| Flux GitOps (source, kustomize, helm, image-reflector, image-automation) | A 6-controller, ~400 MB dependency. Payoff is wasted on ~10 manifests. Returns in goal 2 with multi-app payload + image automation. |
+| Image automation (auto-bump on new SHA tags) | Manual SHA tag bump in `deploy/hermes/40-deployment.yaml` for now. |
 | Shared Postgres (`database` namespace) | No app needs DB until goal 2 apps land. |
 | Any MCP skill app | App lifecycle decoupled from platform. |
 | Telegram / Discord / Slack / any chat platform | Channels need a provider. No provider in goal 1. |
-| `letsencrypt-prod` (ACME) | Not used in goal 1 — Tailscale handles certs. Returns with cert-manager in goal 2. |
-| NetworkPolicies | One pod, one path. Default-allow is fine. |
-| htpasswd dashboard basic-auth | Tailscale ACLs are the auth boundary. |
+| NetworkPolicies | One pod, one path. Default-allow is fine until apps land. |
+| htpasswd / OIDC dashboard auth | Mesh ACL is the auth boundary. |
 | Backups | No state worth backing up at goal 1. |
 | Multi-tenant, multi-operator, multi-cluster | Out of scope forever. |
 
@@ -391,17 +421,40 @@ Total wall time, fresh start to dashboard reachable: ~10–15 minutes.
 > `100.83.47.56`, LAN IP `192.168.2.200`. These are the reference cluster.
 > Substitute your own from `cluster.config.yaml` everywhere they appear.
 
-### 6.1 Credentials checklist
+### 6.1 Prereqs and credentials
 
-Two, both pre-existing:
+**Tools on the workstation:** `kubectl`, `helm`, `yq`, `envsubst`,
+`ssh`, `scp`. mise users: `mise use -g yq` covers yq.
+
+**Credentials (three):**
 
 | Credential | Where | Used by |
 |---|---|---|
-| SOPS age private key (`~/.config/sops/age/keys.txt`) | Workstation. Generate with `age-keygen -o ~/.config/sops/age/keys.txt` if absent; remember to update `cluster.config.yaml.age.recipient`. | Pre-seeded into cluster for goal 2. Unused at goal 1. |
-| Tailscale OAuth client | Tailscale admin → Settings → OAuth clients → Create. Scopes: `devices:write`, `auth_keys:write`. Tag with `tag:k8s-operator`. | Tailscale Operator authenticates to mint the Hermes ingress device. |
+| SOPS age private key (`~/.config/sops/age/keys.txt`) | Workstation. Generate with `age-keygen -o ~/.config/sops/age/keys.txt` if absent. Note the public `age1...` line — that's the `age.recipient` for `cluster.config.yaml`. | Pre-seeded into cluster for goal 2. Unused at goal 1. |
+| Tailscale OAuth client | Tailscale admin → Settings → OAuth clients → Generate. Scopes: **Devices: Core (Read+Write), Auth Keys: Write**. Tag with **`tag:atrium-operator`** (must be declared in your tailnet ACL `tagOwners` first — see below). | Tailscale Operator mints tailnet devices and auth keys. |
+| Cloudflare API token | https://dash.cloudflare.com/profile/api-tokens → Create Custom Token. Scope: **Zone:DNS:Edit on `<your-domain>`** (Zone:Zone:Read on the same zone is also useful). | cert-manager's DNS-01 solver writes `_acme-challenge.<domain>` TXT records to validate the LE wildcard cert. |
 
-That's it. No Cloudflare, no provider keys, no Postgres, no Flux PAT, no
-GitHub deploy keys.
+**Tailscale ACL prereq.** Before Tailscale will accept `tag:atrium-operator`
+on a device, the tag must be declared as ownable in your tailnet ACL. At
+https://login.tailscale.com/admin/acls/file add to the `tagOwners` block:
+
+```jsonc
+"tagOwners": {
+  "tag:atrium-operator": ["autogroup:admin"],
+},
+```
+
+**DNS prereq.** A public A record at your DNS provider:
+
+```
+hermes.<your-domain>   A   <node's mesh IP>
+```
+
+For Tailscale, "node's mesh IP" is the CGNAT 100.x.y.z the tailnet
+assigned to the node (find with `tailscale ip --4 <hostname>` from a
+mesh member). The record is normal public DNS — but the IP it resolves
+to is only routable from mesh members. Non-members get the DNS answer
+and time out trying to connect.
 
 ### 6.2 Prepare `cluster.config.yaml`
 
@@ -413,8 +466,11 @@ $EDITOR cluster.config.yaml
 
 Fill in:
 - `cluster.name`, `cluster.domain`
-- `cluster.tailnet.tailnet_name` (run `tailscale status --json | jq -r '.MagicDNSSuffix'` on any tailnet member)
+- `cluster.node.{hostname, mesh_ip, lan_ip}`
+- `mesh.magic_dns_suffix` (run `tailscale status --json | jq -r '.MagicDNSSuffix'` on any mesh member)
+- `mesh.hermes_hostname` (defaults to `hermes` — leave it unless you have a reason)
 - `age.recipient` (the public line from `~/.config/sops/age/keys.txt`)
+- `acme.email` (your contact address for LE expiry warnings)
 - Leave `providers.active: null` — goal 1 ships provider-less.
 
 `cluster.config.yaml` is gitignored. It never enters version control.
@@ -537,20 +593,36 @@ kubectl -n flux-system get secret sops-age
 # sops-age   Opaque   1
 ```
 
-### 6.7 Install Tailscale Operator
+### 6.7 Install Tailscale Operator (Helm)
 
 ```bash
 kubectl create namespace tailscale
 
 kubectl create secret generic operator-oauth \
   --namespace=tailscale \
-  --from-literal=client_id='PASTE_TS_CLIENT_ID' \
-  --from-literal=client_secret='PASTE_TS_CLIENT_SECRET'
+  --from-literal=client_id="$TS_CLIENT_ID" \
+  --from-literal=client_secret="$TS_CLIENT_SECRET"
 
-kubectl apply -f https://github.com/tailscale/tailscale/releases/latest/download/operator-manifests.yaml
+helm repo add tailscale https://pkgs.tailscale.com/helmcharts
+helm repo update tailscale
+
+helm upgrade --install tailscale-operator tailscale/tailscale-operator \
+  --namespace tailscale \
+  --set-string oauth.clientId="" \
+  --set-string oauth.clientSecret="" \
+  --set 'operatorConfig.defaultTags={tag:atrium-operator}' \
+  --set-string proxyConfig.defaultTags="tag:atrium-operator" \
+  --wait --timeout=180s
 ```
 
-If the latest-tag URL drifts, pin to a specific release.
+Two non-obvious bits:
+
+- `oauth.clientId`/`clientSecret` are set **empty** so the chart picks up
+  the pre-existing `operator-oauth` Secret instead of overwriting it.
+- The chart has **two separate tag fields**: `operatorConfig.defaultTags`
+  for the operator's own tailnet device, and `proxyConfig.defaultTags`
+  for proxies the operator spawns. Both must be in your ACL `tagOwners`.
+  Setting only one is a common partial fix that fails reconcile.
 
 Validate:
 
@@ -558,96 +630,146 @@ Validate:
 kubectl -n tailscale get pods
 # operator-<hash>   1/1   Running
 
-kubectl -n tailscale logs deploy/operator | head -30
-# expect "starting operator", "starting reconcile loop"; no panic / oauth errors
+kubectl -n tailscale logs deploy/operator --tail=20
+# expect AuthLoop "state is Running; done"; no scope/tag errors
 ```
 
-### 6.8 Apply the Hermes deploy bundle
+### 6.8 Install cert-manager (Helm) + Cloudflare Secret
 
 ```bash
-cd ~/atrium
-kubectl apply -k deploy/hermes/
+helm repo add jetstack https://charts.jetstack.io
+helm repo update jetstack
+
+helm upgrade --install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --create-namespace \
+  --set crds.enabled=true \
+  --wait --timeout=180s
+
+kubectl create secret generic cloudflare-api-token \
+  --namespace=cert-manager \
+  --from-literal=api-token="$CF_API_TOKEN"
 ```
-
-The bundle contains:
-
-| File | What |
-|---|---|
-| `00-namespace.yaml` | `Namespace/hermes` |
-| `10-pvc.yaml` | `PersistentVolumeClaim/hermes-data` 20Gi `local-path` |
-| `20-config.yaml` | `ConfigMap/hermes-config` with provider-less `config.yaml` |
-| `40-deployment.yaml` | `ServiceAccount` + `Deployment/hermes` (init container `bootstrap-home`, container `dashboard` running `hermes dashboard`) |
-| `50-service.yaml` | `Service/hermes-dashboard` ClusterIP + `tailscale.com/expose: "true"` and `tailscale.com/hostname: "hermes"` annotations |
-| `kustomization.yaml` | Lists the manifests above; `configMapGenerator` builds `hermes-soul` ConfigMap from `deploy/hermes/SOUL.md` (single source of truth); sets `namespace: hermes` |
-
-Key shape decisions baked into the manifests:
-
-- **Image pinned** to a specific Hermes SHA tag (`docker.io/nousresearch/hermes-agent:sha-<sha>`). The Flux image-policy marker comment is present but no-op without Flux.
-- **Command override**: `command: ["hermes", "dashboard"]` with args `--host 0.0.0.0 --port 9119 --no-open --insecure`. Without this the image's default entrypoint runs interactive chat — wrong for headless.
-- **`envFrom: hermes-env` with `optional: true`**. The Secret doesn't exist in goal 1; pod boots anyway.
-- **No `API_SERVER_*` env vars**. We don't run `gateway run` or the api_server. That's a goal-2 capability and it needs a provider to be useful.
-- **`bootstrap-home` init container kept** (seeds `config.yaml` + `SOUL.md` onto the PVC). **`collect-skills` init container dropped** (no skill ConfigMaps in goal 1).
-- **Probes hit `/` on port 9119** — the dashboard returns 200 there. The api_server `/health` endpoint doesn't exist in this mode.
-- **Service annotations**: `tailscale.com/expose: "true"`, `tailscale.com/hostname: "hermes"` → device lands at `hermes.<tailnet>.ts.net`. The Operator auto-provisions TLS via Tailscale's built-in Let's Encrypt.
 
 Validate:
 
 ```bash
-kubectl -n hermes get pods
-# hermes-<hash>   1/1   Running   (after ~60s)
-
-kubectl -n hermes logs deploy/hermes
-# dashboard startup; no provider-key tracebacks (those fire only on chat)
-
-kubectl -n hermes get svc hermes-dashboard
-# ClusterIP assigned, port 9119
-
-kubectl -n tailscale get pods
-# additionally: ts-hermes-<hash>   1/1   Running    (the Operator-minted proxy)
+kubectl -n cert-manager get pods
+# cert-manager / cainjector / webhook all 1/1 Running
+kubectl -n cert-manager get secret cloudflare-api-token
+# Opaque, 1 data key
 ```
 
-### 6.9 Reach the dashboard
-
-From any tailnet member:
+### 6.9 Render and apply atrium manifests
 
 ```bash
-curl -I https://hermes.<tailnet>.ts.net
-# HTTP/2 200, valid LE cert
+cd ~/atrium
+./scripts/apply.sh
 ```
 
-Browser to the same URL. Dashboard SPA loads. Sessions, jobs, metrics tabs
-render. Chat tab errors on use — that's correct.
+What this does:
 
-If you don't know your tailnet domain:
-`tailscale status --json | jq -r '.MagicDNSSuffix'` on logos.
+1. Reads `cluster.config.yaml`, exports `CLUSTER_DOMAIN`,
+   `HERMES_HOSTNAME`, `ACME_EMAIL`.
+2. Renders + applies `deploy/platform/` (ClusterIssuer + wildcard
+   Certificate). cert-manager validates via Cloudflare DNS-01 and
+   produces the `wildcard-tls` Secret in the `hermes` namespace.
+3. Renders + applies `deploy/hermes/` (namespace, PVC, ConfigMaps,
+   ServiceAccount, Deployment, Service, Ingress).
+
+Manifest set:
+
+| File | What |
+|---|---|
+| `deploy/platform/cluster-issuer.yaml` | `ClusterIssuer/letsencrypt-prod`, Cloudflare DNS-01 |
+| `deploy/platform/wildcard-cert.yaml` | `Certificate wildcard-tls` in `hermes` ns for `*.${CLUSTER_DOMAIN}` |
+| `deploy/hermes/00-namespace.yaml` | `Namespace/hermes` |
+| `deploy/hermes/10-pvc.yaml` | `PersistentVolumeClaim/hermes-data` 20Gi `local-path` |
+| `deploy/hermes/20-config.yaml` | `ConfigMap/hermes-config` (provider-less) |
+| `deploy/hermes/40-deployment.yaml` | `ServiceAccount` + `Deployment/hermes` |
+| `deploy/hermes/50-service.yaml` | `Service/hermes-dashboard` ClusterIP :9119 |
+| `deploy/hermes/60-ingress.yaml` | Traefik Ingress at `${HERMES_HOSTNAME}.${CLUSTER_DOMAIN}` |
+| `deploy/hermes/kustomization.yaml` | `configMapGenerator` builds `hermes-soul` from `SOUL.md` |
+
+Key shape decisions baked into the manifests:
+
+- **Image pinned** to a specific Hermes SHA tag (`docker.io/nousresearch/hermes-agent:sha-<sha>`).
+- **Binary at an absolute path.** The upstream image doesn't put the
+  hermes CLI on `$PATH`; the Deployment uses
+  `command: ["/opt/hermes/.venv/bin/hermes"]`.
+- **Dashboard-only command.** Args `dashboard --host 0.0.0.0 --port 9119
+  --no-open --insecure`. `--insecure` is what *permits* binding non-
+  localhost — it's not a TLS-disable flag.
+- **`envFrom: hermes-env` with `optional: true`.** Secret may not exist;
+  pod boots anyway. This is what makes provider-less boot work.
+- **No `API_SERVER_*` env vars.** We don't run `gateway run` / api_server
+  — those need a provider to be useful (goal 2).
+- **`bootstrap-home` init container** seeds `config.yaml` + `SOUL.md` onto
+  the PVC on first boot (`cp -n`).
+- **Probes hit `/` on port 9119.** The dashboard returns 200 there;
+  the `/health` endpoint belongs to the api_server, not the dashboard.
+- **Ingress is class `traefik`.** k3s' bundled Traefik fronts it on the
+  node's mesh IP:443 with the cert-manager-issued wildcard.
+
+Watch cert issuance + pod rollout:
+
+```bash
+kubectl -n hermes get certificate wildcard-tls -w   # wait for READY=True
+kubectl -n hermes get pods                          # hermes-<hash> 1/1 Running
+kubectl -n hermes get ingress hermes-dashboard      # ADDRESS = node mesh IP
+```
+
+DNS-01 cert issuance can take 30s–3min (one challenge per name; LE
+sometimes races on `_acme-challenge.<domain>` when both apex and
+wildcard share the TXT name).
+
+### 6.10 Reach the dashboard
+
+From any mesh member:
+
+```bash
+curl -I https://hermes.<your-domain>
+# HTTP/2 200 (HEAD may return 405 — only GET is allowed; SPA loads fine)
+```
+
+Browser to the same URL. Dashboard SPA loads. Sessions / jobs / metrics /
+logs tabs render. Chat tab errors on use — that's correct (no provider).
 
 **Goal 1 done.**
 
-### 6.10 End-to-end validation table
+### 6.11 End-to-end validation table
 
 | Phase | Check | Expected |
 |---|---|---|
 | 6.3 | `which k3s; ls /var/lib/rancher 2>&1` | empty; "No such file or directory" |
-| 6.4 | `sudo k3s kubectl get nodes` | `logos Ready control-plane,master v1.36.0+k3s1` |
-| 6.5 | `kubectl get nodes -o wide` | `logos Ready ... <tailnet IP>` |
+| 6.4 | `sudo k3s kubectl get nodes` | `<host> Ready control-plane v1.36.0+k3s1` |
+| 6.5 | `kubectl get nodes -o wide` | shows `<mesh IP>` as EXTERNAL-IP |
 | 6.6 | `kubectl -n flux-system get secret sops-age` | one secret, Opaque |
-| 6.7 | `kubectl -n tailscale get pods` | `operator 1/1 Running` |
-| 6.8 | `kubectl -n hermes get pods` | `hermes 1/1 Running` after ~60s |
-| 6.8 | `kubectl -n tailscale get pods` | additional `ts-hermes-<hash> 1/1 Running` |
-| 6.9 | `curl -I https://hermes.<tailnet>.ts.net` | `HTTP/2 200`, valid TLS |
-| 6.9 | Browser at same URL | SPA + tabs render |
+| 6.7 | `kubectl -n tailscale get pods` | `operator 1/1 Running`; logs show `AuthLoop ... done` |
+| 6.8 | `kubectl -n cert-manager get pods` | 3 pods all 1/1 Running |
+| 6.9 | `kubectl -n hermes get certificate wildcard-tls` | `READY True` within ~3 min |
+| 6.9 | `kubectl -n hermes get pods` | `hermes 1/1 Running` |
+| 6.9 | `kubectl -n hermes get ingress` | ADDRESS = node mesh IP, PORTS = 80,443 |
+| 6.10 | `curl -I https://hermes.<your-domain>` | `HTTP/2`, valid TLS |
+| 6.10 | Browser at same URL | SPA + tabs render, green lock |
 
-### 6.11 Failure modes
+### 6.12 Failure modes
 
-**Tailscale Operator doesn't mint a proxy for the Service.**
-Symptom: only `operator` pod in `tailscale` ns; no `ts-hermes-<hash>`.
-Diagnose: `kubectl -n tailscale logs deploy/operator | tail -50`. Common
-causes: OAuth scopes missing `devices:write` (401 in logs); annotation
-typo (`tailscale.com/expose: true` without quotes — must be a quoted
-string); operator hasn't picked it up yet (give it 60s).
-Recover: fix annotation/secret;
-`kubectl -n hermes annotate svc hermes-dashboard tailscale.com/expose-`
-then re-annotate to trigger reconcile.
+**Tailscale Operator reconcile fails with `requested tags [...] invalid or not permitted`.**
+The chart's `proxyConfig.defaultTags` (default `tag:k8s`) is separate
+from `operatorConfig.defaultTags`. Both tags must exist in your tailnet
+ACL `tagOwners`. Fix: either add the missing tag to `tagOwners` in the
+ACL, or `helm upgrade` with both set to the same declared tag (see
+§6.7).
+
+**cert-manager Certificate stays `READY=False` for >5 min.**
+`kubectl -n hermes describe certificate wildcard-tls` and check the
+linked `Challenge` resource. Common: Cloudflare token lacks
+`Zone:DNS:Edit` scope (challenge logs show 403); DNS propagation is slow
+(cert-manager polls authoritative ns; wait or
+`kubectl -n cert-manager rollout restart deploy/cert-manager`); ACME
+account-key mismatch (delete `letsencrypt-prod-account-key` Secret in
+`cert-manager` ns and let it re-register).
 
 **Hermes pod CrashLoopBackOff.**
 Diagnose: `kubectl -n hermes logs deploy/hermes --previous`,
@@ -663,10 +785,20 @@ The `--insecure` flag is what permits binding to a non-localhost host
 403 fires anyway, check the dashboard hasn't picked up an unexpected
 auth env var; verify the args in the Deployment match the runbook.
 
-**Tailnet hostname doesn't resolve from workstation.**
-`tailscale status` — workstation logged in? MagicDNS enabled in Tailscale
-admin? Operator-minted device shows up there within 30s of the proxy pod
-going Ready.
+**Dashboard URL doesn't resolve from workstation, but `curl` from the workstation works.**
+Almost always browser DNS-over-HTTPS. Public DNS publishes
+`hermes.<your-domain>` → mesh CGNAT IP correctly, but a browser with DoH
+on still queries Cloudflare/Google, which return the answer fine because
+the name is publicly resolvable. If a browser fails: check the browser
+DNS settings (Arc/Chrome: `arc://settings/security` → Secure DNS to "use
+system DNS"). Note this entire issue is *avoided* by using a custom
+domain rather than `<host>.<tailnet>.ts.net` — the latter requires
+MagicDNS, which DoH bypasses; the former is normal public DNS.
+
+**Workstation can curl but can't ping the node mesh IP.**
+Not actually a problem. Tailscale ACL defaults often block ICMP between
+devices. The TCP connection on port 443 still works (that's what
+`curl` uses). Ignore unless you actually need ping.
 
 **PVC stuck Pending.**
 `local-path-provisioner` pod in `kube-system` not Running → k3s install
@@ -677,13 +809,14 @@ The uninstall script may have silently no-op'd. Manually
 `sudo systemctl stop k3s; sudo systemctl disable k3s; sudo rm /usr/local/bin/k3s* /etc/systemd/system/k3s*`
 and rerun §6.4.
 
-### 6.12 You-are-here markers
+### 6.13 You-are-here markers
 
-- After §6.4: **k3s up. No workloads. No tailnet device for the cluster yet.**
-- After §6.7: **Tailscale Operator running, idle (no Services to expose).**
-- After §6.8: **Hermes pod running. ClusterIP-only — not yet reachable outside the cluster.**
-- After §6.8 + ~30s: **Tailscale proxy pod up. `hermes.<tailnet>.ts.net` resolves.**
-- After §6.9: **Goal 1 complete.**
+- After §6.4: **k3s up, no workloads.**
+- After §6.6: **age key planted for goal-2 SOPS use. Still no workloads.**
+- After §6.7: **Tailscale Operator running, has a tailnet identity.**
+- After §6.8: **cert-manager + CRDs ready; Cloudflare token in cluster.**
+- After §6.9 (`./scripts/apply.sh`): **wildcard cert issued; Hermes pod 1/1 Running; Traefik routing `hermes.<your-domain>` → dashboard.**
+- After §6.10: **Goal 1 complete — dashboard reachable in any browser.**
 
 ---
 
@@ -751,17 +884,17 @@ choices don't paint goal-2 work into a corner.
 | Future capability | Seam | Notes |
 |---|---|---|
 | **Model provider** (after goal 1.5) | `cluster.config.yaml.providers.<active>` block + `hermes-env` Secret + ConfigMap `model:` block. Mechanism (config-file vs dashboard vs both) TBD by goal 1.5. | The Deployment already does `envFrom: hermes-env` with `optional: true`. No manifest changes. |
-| **Flux GitOps** | `platform/clusters/default/` Flux root, `platform/infrastructure/{secrets,controllers,configs}/`, `platform/apps/<app>.yaml` pointers. `flux bootstrap github --owner ... --repo atrium --path platform/clusters/default`. | Adds source/kustomize/helm/notification controllers + (optional) image-reflector/image-automation. |
-| **cert-manager + wildcard cert** | `platform/infrastructure/controllers/cert-manager.yaml` (HelmRelease), `platform/infrastructure/configs/clusterissuer-letsencrypt.yaml`, `platform/infrastructure/configs/wildcard-cert.yaml`. Cloudflare API token in `cf-api-token` Secret (SOPS). Start with `letsencrypt-staging`; flip to `-prod` after a clean run. | Wildcard on `*.<cluster.domain>`. Replaces Tailscale-managed certs when we want to serve at a custom domain. |
-| **Traefik routing** | `IngressRoute` per service. Host-based routing across many apps. Tailscale Operator can either front Traefik (single tailnet device for many ingresses) or front each Service individually (one device per service). Decide when the second service lands. | k3s already ships Traefik; nothing to install. |
-| **Image automation** | `platform/infrastructure/image-automation/` + `--components-extra=image-reflector-controller,image-automation-controller` on `flux bootstrap`. Per-app `ImageRepository`/`ImagePolicy`/`ImageUpdateAutomation`. Tag scheme `<unix-ts>-sha-<git-sha>` + a marker comment in each Deployment manifest. | Adds Flux-managed deploy keys per app repo. |
+| **Flux GitOps** | `platform/clusters/default/` Flux root, `platform/apps/<app>.yaml` pointers per app, `platform/infrastructure/` for shared resources. `flux bootstrap github --owner ... --repo atrium --path platform/clusters/default`. Existing `deploy/platform/` + `deploy/hermes/` move under `platform/`. | Adds source/kustomize/helm/notification controllers + (optional) image-reflector/image-automation. Flux's `postBuild.substituteFrom` replaces `scripts/apply.sh` for the templating dance. |
+| **SOPS-encrypted Secrets in git** | Encrypt provider Secrets, Cloudflare token, etc. with the age key pre-seeded in `flux-system/sops-age` (§6.6). Flux's kustomize-controller decrypts on apply. | Today: Secrets are created out-of-band (kubectl create + tempfile). Goal 2 brings them into git. |
+| **Image automation** | `--components-extra=image-reflector-controller,image-automation-controller` on `flux bootstrap`. Per-app `ImageRepository`/`ImagePolicy`/`ImageUpdateAutomation`. Tag scheme `<unix-ts>-sha-<git-sha>` + a `$imagepolicy` marker comment on each `image:` line. | Today: manual SHA bump in `deploy/hermes/40-deployment.yaml`. |
+| **Multiple Ingresses + Traefik middleware** | Per-app Ingress with `ingressClassName: traefik`; shared wildcard cert (already in place). Optional middleware like basic-auth via `Middleware` CRD. | Today: only the Hermes Ingress exists. Wildcard cert already covers any future `<app>.<cluster.domain>` Host. |
 | **MCP skill apps** | `platform/apps/<app>.yaml` is a Flux `GitRepository` + `Kustomization` pointing at the app's `deploy/k8s/`. App ships its own `SKILL.md` ConfigMap labelled `role=skill` in the `hermes` namespace. Hermes' `collect-skills` init container (returned at goal 2) discovers it. | Zero changes to Hermes Deployment per new app. |
 | **Shared Postgres** | `platform/infrastructure/controllers/postgres.yaml` + per-app `<app>-db` Secret. | Install when first app needs DB. |
 | **Chat platforms (Telegram, Discord, Slack)** | `hermes-env` gets channel tokens; ConfigMap's `platforms:` block grows the platform name. Per-platform NetworkPolicy egress covered by "TCP/443 to public" when NetworkPolicy lands. | Requires a provider (goal 2+). |
 | **App-to-app calls** | Hermes' `delegate_tool` + per-app `mcp_servers.<name>` in `config.yaml`. Always mediated by Hermes. | No direct app-to-app NetworkPolicy needed. |
 | **RBAC / capability gating** | `metadata.atrium.auth-class` field in `SKILL.md` frontmatter. v1 enum `{open, hermes-only}`. | Field exists in the schema from day one of contracts; goal 1 doesn't enforce. |
 | **Multi-tenant / multi-operator** | Not on the roadmap. | If it ever moves: per-tenant cluster, no cross-tenant resources. Explicitly not a seam. |
-| **Alternative private-mesh ingress** | Replace the Tailscale Operator install (§6.7) and the `tailscale.com/expose` Service annotations with the equivalent for another mesh. **Headscale** (self-hosted Tailscale control plane) drops in without any change to atrium — same client, same operator, different coordination server. **Nebula / Innernet / ZeroTier** would need a different ingress mechanism (NodePort + the mesh's own routing, typically). | The platform principle is "private mesh"; Tailscale is the default implementation. Atrium ships Tailscale because it's the lowest-friction option (zero-cost TLS, MagicDNS, ACL). Swap the implementation, keep the principle. |
+| **Alternative private-mesh ingress** | Atrium's traffic path is "public DNS → mesh CGNAT IP → k3s Traefik" — the mesh layer is only there to make the IP reachable from operator devices. Headscale slots in identically (same Tailscale client, different coordination server). Other meshes (Nebula, Innernet, ZeroTier) need a different IP-assignment story but the rest (DNS, Traefik, cert-manager) is unchanged. | The principle is "private mesh"; Tailscale is the default implementation. |
 | **SOUL configurability** | `cluster.config.yaml.soul` block (path to a SOUL.md or inline content); the ConfigMap `hermes-soul` gets rendered from it. Today: committed `deploy/hermes/SOUL.md` is the source. | Lets a stranger cloning atrium ship their own agent voice without forking. Shape TBD — `inline:` field vs `file:` reference vs library of named souls (`steward`, `mentor`, `gardener`, …). |
 | **`contracts/` as a published artifact** | Folder for now. Re-evaluate when a second person writes an atrium app. | Could become a Go module, npm package, docs site. |
 
@@ -777,16 +910,15 @@ choices don't paint goal-2 work into a corner.
 | Config surface | `cluster.config.yaml` gitignored + `cluster.config.example.yaml` checked in | Helm values / env vars / sed templates | One file the operator edits; the rest of the repo is platform-shape, not personal. Gitignored because per-host identity, not because secret. |
 | SOUL | One committed `SOUL.md` shipping a direct, decisive default voice | `SOUL.example.md` + operator-authored real one / no SOUL at all / operator-supplied SOUL at install time | The agent shell needs *a* voice at goal 1; operator-configurable SOUL is a goal-2+ seam (§8). One committed default unblocks goal 1. |
 | Goal-1 provider posture | None | Wire one provider key (any of the five in §4) at goal 1 | Provider abstraction is core (§4); goal 1 proves the platform without committing. |
-| Ingress posture | Private mesh, no public services | Public DNS + LE certs / Cloudflare Tunnel | Single-tenant by thesis; public ingress contradicts it. See §8 if you need an alternative private mesh. |
-| Default private mesh | Tailscale | Headscale / Nebula / Innernet / ZeroTier | Tailscale is the lowest-friction implementation of the principle (zero-cost TLS via `.ts.net`, MagicDNS, ACL out of the box). The principle is "private mesh"; the implementation is a sensible default the operator can swap (§8). |
-| Goal-1 GitOps | None — plain `kubectl apply -k` | Flux from day one | Flux is overkill for ~4 manifests. Returns at goal 2 when there are multiple apps and credential lifecycles. |
-| Goal-1 TLS | Mesh-provided cert (Tailscale's `.ts.net` auto-LE) | cert-manager + DNS-01 wildcard from day one | The mesh handles certs for free. cert-manager returns at goal 2 if/when a custom domain is wanted. |
-| Goal-1 ingress shape | Mesh Operator exposes the Hermes Service directly | Mesh Operator → Traefik → Service | Without a wildcard and multiple ingresses, Traefik adds no value. Returns at goal 2. |
-| Ingress strategy (long-term) | Mesh Operator in front of (optionally) Traefik | per-service mesh sidecar | One mesh device per service today; can fan out via Traefik when the cluster has many services. |
-| Secrets | SOPS + age | sealed-secrets / external-secrets-operator | Stable, well-supported, plays cleanly with Flux. age key pre-seeded at goal 1; SOPS encryption lands at goal 2 with Flux. |
+| Ingress posture | Private mesh, no public services | Public DNS + public LoadBalancer / Cloudflare Tunnel | Single-tenant by thesis. Public DNS names point at *mesh-only* IPs — the DNS answer leaks publicly, the IP doesn't. |
+| Default private mesh | Tailscale | Headscale / Nebula / Innernet / ZeroTier | Tailscale is the lowest-friction implementation (auto CGNAT IP, MagicDNS, ACL). Headscale is the self-hosted slot-in. Others would need a different IP-assignment story. |
+| Dashboard URL shape | `https://hermes.<your-domain>` (custom domain) | `https://hermes.<tailnet>.ts.net` (MagicDNS) | Custom-domain DNS resolves in every browser. MagicDNS resolution silently breaks in Chromium-family browsers with DoH on — DoH bypasses the OS resolver. |
+| Templating | Placeholder values in committed YAML + `scripts/apply.sh` renders via envsubst | Helm chart / Flux postBuild / kustomize replacements | `kubectl kustomize \| envsubst \| kubectl apply` is the smallest tool chain that keeps committed files generic. Goal 2 substitutes Flux's `postBuild.substituteFrom` for the same job. |
+| Goal-1 GitOps | None — `scripts/apply.sh` | Flux from day one | Flux is overkill for ~10 manifests. Returns at goal 2 with multi-app payload + image automation. |
+| Secrets | SOPS + age (encryption lands at goal 2) | sealed-secrets / external-secrets-operator | Stable, well-supported, plays cleanly with Flux. age key pre-seeded at goal 1; Secrets created out-of-band until then. |
 | Runtime | k3s `v1.36.0+k3s1` | k0s, full k8s, microk8s | Small single-node target; k3s is the right size. v1.36.0 is current latest stable as of design time. |
-| Goal-1 image pinning | Pin Hermes to a specific SHA tag | `:latest` | `:latest` drifts. Manual bump in goal 1; Flux image automation in goal 2. |
-| First-cert issuer (goal 2) | `letsencrypt-staging`, flip to `-prod` after one clean run | `letsencrypt-prod` from day one | Avoid burning LE prod quota on iteration. |
+| Image pinning | Pin Hermes to a specific SHA tag | `:latest` / `:main` | `:latest` drifts. Manual SHA bump at goal 1; Flux image automation at goal 2. |
+| ClusterIssuer | `letsencrypt-prod` from day one | Staging first, flip later | The DNS-01 flow worked end-to-end against prod LE on first try with the documented Cloudflare token scopes. Staging recipe is commented in `cluster-issuer.yaml` if iteration ever burns the rate limit. |
 
 ---
 
