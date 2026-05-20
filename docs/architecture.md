@@ -16,6 +16,9 @@ top to bottom.
 If you only read three sections, read **[What atrium adds above Hermes](#1-5-what-atrium-adds-above-hermes)**,
 **[Provider abstraction](#4-provider-abstraction)**, and **[Bootstrap runbook](#6-bootstrap-runbook)**.
 
+App authors: jump straight to **[`docs/app-conventions.md`](app-conventions.md)**
+for the contract.
+
 ---
 
 ## 1. The platform thesis
