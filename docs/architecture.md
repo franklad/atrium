@@ -77,32 +77,41 @@ anything that speaks MCP and reads a `config.yaml`.
 
 ## 1.5. What atrium adds above Hermes
 
-Hermes is already most of the runtime. The dashboard's `/api/*` surface
-exposes config, models, providers, keys, plugins, skills, profiles,
-cron, sessions, auth, and the channel gateway — every Hermes
-functionality is programmable, not just viewable. Atrium does not
-duplicate any of that.
+Hermes is most of the runtime. The dashboard's `/api/*` surface exposes
+config, models, providers, keys, plugins, skills, profiles, cron,
+sessions, auth, and the channel gateway. The CLI ships subcommands for
+every one of those plus skill install/publish, skill bundles, skill
+curator, OAuth credential pool, and a local OAuth bridge. **Atrium
+does not duplicate any of that.**
 
-What atrium adds, by category:
+Atrium's contribution is **substrate-shaped**: where Hermes runs, how
+operator-authored apps live alongside it, what operational opinions
+ship together. Concretely:
 
-| Layer | Hermes-native | Atrium adds |
+| Capability | Hermes-native | Atrium adds today |
 |---|---|---|
-| **Skill contract** | `SKILL.md` with name/description/triggers — instruction-flavored | Extended SKILL.md with OAuth flow spec, capability semantics, trust class, UI hint, versioning — service-contract-flavored. See `docs/skill-contract.md` (forthcoming). |
-| **Skill discovery** | Filesystem rglob over `~/.hermes/skills/` | A convention for public skill manifests (`/.well-known/agent-skill.json` on the app's domain), so a user can `atrium install <url>` for any third-party app |
-| **App auth** | API-key + OAuth flows *for model providers* | OAuth orchestration *for apps* (Spotify, Google, etc.) with per-skill trust profiles |
-| **Substrate** | None — Hermes is a binary/image; where it runs is the operator's problem | Opinionated deployments: k3s+Tailscale+cert-manager today; docker-compose planned; native-systemd planned |
-| **First-party app runtime** | None — Hermes calls remote MCP endpoints, doesn't host them | A place to run the operator's own apps (gustus/pantry-shaped) alongside Hermes, with shared infra (Postgres, certs, ingress) |
-| **Curated defaults** | Neutral on channels/plugins/SOUL | An opinionated default `SOUL.md`, default channel set, default plugin posture, default secret-management (SOPS+age) |
+| Model providers | 29 bundled providers + plugin registry + OAuth pool + `hermes proxy` + `hermes auth {add,list,remove,reset,status,logout,spotify}` + `hermes model`/`fallback` | Nothing. Atrium boots clean: no `model:`/`auxiliary:`/`fallback_model:` in the seeded `config.yaml`; `envFrom hermes-env` is `optional: true`. |
+| Skill contract + schema | Full `SKILL.md` schema (agentskills.io-compatible), tolerant of unknown frontmatter under `metadata.*` | Nothing. Apps use Hermes' schema as-is. |
+| Skill install / discovery / publish | `hermes skills install <url>` against 6 source types (official / skills-sh / well-known / github / clawhub / claude-marketplace) + full lifecycle (browse / search / inspect / install / list / check / update / audit / uninstall / reset / publish / snapshot / tap / config) | Nothing. App-conventions doc recommends `hermes skills install` against the app's `.well-known/agent-skill`. |
+| Skill bundles | `hermes bundles {list,show,create,delete,reload}` + `/<bundle>` slash command | Nothing. |
+| Skill curator | `hermes curator {status,run,pause,resume,pin,unpin}` for automatic skill management | Nothing. |
+| App OAuth (third-party SaaS) | `hermes auth spotify` (PKCE) + `_OAUTH_CAPABLE_PROVIDERS` includes 7+ providers out of the box | Nothing. |
+| Default SOUL | `hermes_cli/default_soul.py` seeds a Hermes-flavored default on first boot | An **alternative** default `SOUL.md` ("Steward" voice) in `deploy/hermes/SOUL.md`, rendered into the ConfigMap that seeds the PVC. Substitution, not addition. |
+| **Deploy substrate** | None — Hermes is a binary/image; where and how it runs is the operator's problem | **k3s + Tailscale + cert-manager + Traefik** wired together: namespace, PVC, ConfigMap seeding, public-DNS-at-mesh-CGNAT-IP wildcard-TLS ingress, `scripts/apply.sh` install motion. ✓ |
+| **Operator-authored app hosting** alongside Hermes | None — Hermes calls remote MCP endpoints, doesn't host apps | A place to run apps in the same cluster: `<app>-be` / `<app>-fe` namespace conventions, `scripts/apply-app.sh` bridge that renders + applies an app's `deploy/k8s/` against atrium's substrate. ✓ |
+| **Operational opinions** | None — Hermes is neutral | Substrate-level stance: private-mesh-first (no public services), public DNS names point at mesh-only routable IPs (DoH-friendly), SOPS+age for secret management (encryption-in-git is goal-2 work). ✓ |
 
-The split is intentional: anything that benefits every Hermes user
-(richer SKILL.md fields, OAuth orchestration primitives) gets proposed
-upstream once proven in atrium. Anything that's an *opinion* (this
-particular substrate, this particular default voice, this particular
-trust model) stays in atrium where opinions are welcome.
+Three rows where atrium genuinely contributes. Eight rows where atrium
+contributes nothing because Hermes already shipped it. Earlier drafts
+of this doc claimed atrium added a skill contract, an install motion,
+OAuth orchestration, and a default voice. All four were wrong — Hermes
+ships the contract, the install motion, and OAuth; the SOUL is a
+substitution not an addition.
 
-Atrium does not fork Hermes. It depends on Hermes upstream and
-contributes back. The relationship is the same as Ubuntu's to the
-Linux kernel.
+Atrium does not fork Hermes and does not extend the contract. It is
+the operational layer around the runtime: substrate, app-hosting
+conventions, opinions. The relationship is closer to Ubuntu's to the
+Linux kernel than to a platform on top of one.
 
 ---
 
@@ -224,8 +233,8 @@ cert exists before the Ingress references its Secret.
 
 | Entry | Why |
 |---|---|
-| `cluster.config.yaml` (gitignored) | One file is the difference between a platform and a snapshot. Everything host-specific lives here — domain, mesh suffix, node hostname, age recipient, ACME email, active model provider config. Gitignored because it carries identity, not because it's secret in the SOPS sense. Templates reference its values via `${CLUSTER_DOMAIN}`, `${HERMES_HOSTNAME}`, `${ACME_EMAIL}`; `scripts/apply.sh` does the substitution at install time. |
-| `cluster.config.example.yaml` (checked in) | The template. Includes commented-out blocks for every supported provider+auth combination. A stranger cloning the repo sees the shape immediately. |
+| `cluster.config.yaml` (gitignored) | One file is the difference between a platform and a snapshot. Host-specific values live here — domain, mesh suffix, node hostname, age recipient, ACME email. Provider config is **not** here (it's Hermes-native, configured via the dashboard or `hermes auth` after the cluster is up). Gitignored because it carries identity, not because it's secret in the SOPS sense. Templates reference its values via `${CLUSTER_DOMAIN}`, `${HERMES_HOSTNAME}`, `${ACME_EMAIL}`; `scripts/apply.sh` does the substitution at install time. |
+| `cluster.config.example.yaml` (checked in) | The template. Documents the per-host fields and where to source values from. A stranger cloning the repo sees the shape immediately. |
 | `scripts/apply.sh` | The install command. Reads `cluster.config.yaml`, exports its values as env vars, runs `kubectl kustomize <dir> \| envsubst \| kubectl apply -f -` for `deploy/platform/` then `deploy/hermes/`. Prereqs: yq, envsubst, kubectl. |
 | `deploy/platform/` | Cluster-wide infra: cert-manager `ClusterIssuer` (Let's Encrypt prod, Cloudflare DNS-01) + wildcard `Certificate` for `*.${CLUSTER_DOMAIN}`. cert-manager itself is installed once via Helm — see §6.7. |
 | `deploy/hermes/` | The Hermes deploy. Provider-less ConfigMap, Deployment running `hermes dashboard`, Service, Traefik Ingress. |
@@ -250,169 +259,47 @@ cert exists before the Ingress references its Secret.
 
 ---
 
-## 4. Provider abstraction
+## 4. Provider posture
 
-**The most load-bearing section of this doc. Read it twice.**
+**Atrium adds nothing to model-provider abstraction. Hermes ships all of
+it.** 29 bundled provider profiles live under `plugins/model-providers/`
+in the Hermes repo (anthropic, openai-codex, openrouter, xai, gemini,
+deepseek, kimi, bedrock, azure-foundry, ollama-cloud, copilot, plus 18
+more). The OAuth credential pool (`hermes auth {add,list,remove,reset,
+status,logout,spotify}`), the local OAuth bridge (`hermes proxy`), the
+per-provider auth flows including Spotify PKCE, the model selection
+CLIs (`hermes model`, `hermes fallback`), the dashboard control plane
+at `/api/{providers,models,keys,auth}` — Hermes-native, every one of
+them. Operators pick their provider via the dashboard, the CLI, or by
+editing `~/.hermes/config.yaml` on the PVC. Atrium has no opinion about
+which one and exposes no second-class config surface for it.
 
-Atrium does not commit to any model provider or any auth flow. The platform
-boots without one. The seam to add one is neutral across every combination
-the operator might choose now or later.
+What atrium *does* provide is **the ability to boot before any provider
+is configured**. Three concrete details:
 
-### The principle
+- The seeded `config.yaml` at `deploy/hermes/20-config.yaml` has no
+  `model:`, `auxiliary:`, `fallback_model:`, `platforms:`, or
+  `mcp_servers:` blocks — just the runtime-shaped sections (terminal,
+  compression, memory, session_reset, agent, display, skills).
+- The Deployment's `envFrom` references the `hermes-env` Secret with
+  `optional: true`, so the pod schedules and runs even when no Secret
+  exists.
+- The probes hit `/` on port 9119 — the dashboard, which boots and
+  serves without any model upstream.
 
-The cluster is the platform. The agent is the shell. **The model provider is
-configuration.** The platform must:
+`./scripts/apply.sh` against a fresh cluster gives you a dashboard
+reachable at `https://hermes.<your-domain>` with zero credentials in
+play. Once the operator wants to chat, they wire a provider via the
+Hermes dashboard or `hermes auth add` — neither path touches atrium.
 
-1. Boot to a working state with **no provider configured at all**.
-2. Accept any of the supported provider+auth combinations through a single
-   neutral seam.
-3. Not bake provider-specific assumptions into manifests, scripts, docs, or
-   contracts anywhere outside the seam itself.
+### Operational rule (not a contract)
 
-The operator is going to settle on a provider+auth combination later. The
-design has no opinion on which one.
-
-### Supported combinations (5)
-
-| # | Combination | Auth model | Where credentials live |
-|---|---|---|---|
-| A | **Anthropic API key** | Static API key | `ANTHROPIC_API_KEY` in `hermes-env` Secret |
-| B | **Anthropic OAuth (Claude.ai subscription)** | OAuth (browser flow), refreshable token | `~/.hermes/auth.json` on the PVC (initial flow run from a pod exec or sidecar; see "OAuth seam" below) |
-| C | **OpenRouter** | Static API key | `OPENROUTER_API_KEY` in `hermes-env` Secret |
-| D | **OpenAI** | Static API key | `OPENAI_API_KEY` in `hermes-env` Secret |
-| E | **Local / OpenAI-compatible (Ollama, vLLM, LM Studio, any `base_url`)** | Optional API key or none | `base_url` in Hermes `config.yaml`; optional `api_key` env |
-
-These five cover the realistic operator choices. Anything else
-OpenAI-compatible drops into (E) by changing one `base_url`.
-
-### What the goal-1 cluster ships
-
-- **No provider configured.** Hermes `config.yaml` has no `model:` block, no
-  `auxiliary:` block, no `fallback_model:`, no `platforms:` chat
-  integrations. The dashboard SPA renders; chat returns "no provider
-  configured" on use.
-- **`hermes-env` Secret absent** (or present-and-empty). Hermes' Deployment
-  references it via `envFrom` with `optional: true` so its absence doesn't
-  block scheduling.
-- **`cluster.config.example.yaml` carries a `providers:` section** with all
-  five combinations spelled out, **all commented out**. The operator
-  uncomments one when ready.
-
-### Shape of `providers:` in `cluster.config.example.yaml`
-
-Sketch only — the example file in the repo carries the full version. The
-shape:
-
-```
-providers:
-  active: null               # set to one of: anthropic-api, anthropic-oauth,
-                             # openrouter, openai, local
-  # anthropic-api:
-  #   model:
-  #     provider: anthropic
-  #     model: claude-opus-4
-  #   env:
-  #     ANTHROPIC_API_KEY: <set via SOPS in goal 2>
-  #
-  # anthropic-oauth:
-  #   model:
-  #     provider: codex          # Hermes' codex/Anthropic-OAuth slot
-  #     model: claude-opus-4
-  #   auth:
-  #     flow: oauth-browser      # initial flow runs once; token in auth.json on PVC
-  #   env: {}                    # OAuth doesn't carry an API key
-  #
-  # openrouter:
-  #   model:
-  #     provider: openrouter
-  #     model: anthropic/claude-opus-4
-  #   env:
-  #     OPENROUTER_API_KEY: <set via SOPS in goal 2>
-  #
-  # openai:
-  #   model:
-  #     provider: openai
-  #     model: gpt-5
-  #   env:
-  #     OPENAI_API_KEY: <set via SOPS in goal 2>
-  #
-  # local:
-  #   model:
-  #     provider: openai            # OpenAI-compatible client
-  #     model: qwen2.5-coder:32b
-  #     base_url: http://ollama.ollama.svc.cluster.local:11434/v1
-  #     api_key: ollama             # placeholder; Ollama ignores it
-  #   env: {}
-```
-
-### Three artifacts the seam touches, and only these
-
-1. **`cluster.config.yaml`** (gitignored, per-host) carries `providers.active`
-   plus the active block. The example file documents all five.
-2. **`hermes-env` Secret** in the `hermes` namespace carries the env vars
-   the active provider needs (zero, one, or more keys). Plain `Opaque`
-   Secret at goal 1; SOPS-encrypted at goal 2.
-3. **Hermes' `config.yaml`** carries the `model:` / `auxiliary:` /
-   `fallback_model:` blocks the active provider expects. **At goal 1, it has
-   no provider blocks at all.**
-
-Nothing in `deploy/hermes/40-deployment.yaml`, `50-service.yaml`, or any
-script changes when the operator picks a provider. The Deployment already
-does `envFrom: [{secretRef: {name: hermes-env, optional: true}}]`. The
-ConfigMap is the only manifest that grows a `model:` block.
-
-### OAuth seam (for combinations B and similar)
-
-Anthropic OAuth, MiniMax OAuth, xAI Grok OAuth, and future OAuth providers
-need a browser-driven initial flow that lands a token at
-`~/.hermes/auth.json` on the PVC. Token refresh after that is Hermes'
-problem, not the platform's.
-
-The seam:
-
-- **One-time initial flow**: `kubectl -n hermes exec -it deploy/hermes -- hermes model`,
-  pick the OAuth provider, follow the URL printed in the pod logs from a
-  tailnet-connected browser. Token lands on the PVC and survives pod
-  restarts.
-- **Token refresh**: Hermes refreshes in-process. Nothing for the platform
-  to do.
-- **If a sidecar/init container is ever needed** (e.g. for headless re-auth),
-  it lives at `deploy/hermes/45-oauth-sidecar.yaml`. Not designed yet.
-  Listed here so the seam is named.
-
-### What goal-2 picks (deferred)
-
-The operator explicitly defers the goal-2 wiring mechanism. Two shapes are
-viable; **do not pick one until after goal 1.5**:
-
-- **Config-file-driven**: operator edits `cluster.config.yaml`, edits the
-  Hermes `config.yaml` ConfigMap (or has a `render-config.sh` script that
-  generates the ConfigMap from `cluster.config.yaml.providers.<active>`),
-  edits the SOPS-encrypted `hermes-env` Secret, commits, Flux reconciles.
-  Everything in git, everything auditable.
-- **Dashboard-driven**: operator logs into the Hermes dashboard, configures
-  the provider through whatever UI Hermes exposes. Hermes writes through to
-  `~/.hermes/config.yaml` and `~/.hermes/.env` on the PVC. Atrium's
-  ConfigMap and Secret become bootstrap seeds that the dashboard overrides
-  at runtime.
-- **Both**: atrium's ConfigMap+Secret are the bootstrap; the dashboard can
-  also mutate the PVC copies for ad-hoc tweaks; periodic reconcile would
-  blow away dashboard changes. This combination needs the most thought.
-
-Implication for goal 1: **do not bake the canonical Hermes `config.yaml`
-into a committed file that the platform reconciles on every Flux loop until
-we know whether the dashboard wants to write to it.** Goal 1 ships the
-ConfigMap; that's fine because there's no Flux yet. Goal 2 needs to revisit
-this.
-
-### Banned assumptions
-
-| Anti-pattern | Atrium's rule |
-|---|---|
-| A specific provider env var referenced as "the upstream" anywhere outside the seam | The active provider, whichever it is, is the only upstream. No prose, no manifest, no script names a specific provider as the default. |
-| Manifests `envFrom` a Secret whose absence crashes the pod | `envFrom` carries `optional: true`. Provider-less boot is a first-class state. |
-| Provider-specific health checks | Health checks probe Hermes' dashboard, not any provider. |
-| Provider-specific egress NetworkPolicies | Goal-1 has no NetworkPolicy. Goal-2 egress allow is "TCP/443 to public" — provider-neutral. |
+The one rule atrium enforces on itself is **don't break Hermes' provider
+neutrality**: no manifest, no script, no doc names a specific provider
+as the default; `envFrom` carries `optional: true` wherever a Secret
+might be absent; health checks never probe a provider. These are
+guardrails for what atrium *itself* doesn't do, not capabilities atrium
+adds.
 
 ---
 
@@ -537,7 +424,10 @@ Fill in:
 - `mesh.hermes_hostname` (defaults to `hermes` — leave it unless you have a reason)
 - `age.recipient` (the public line from `~/.config/sops/age/keys.txt`)
 - `acme.email` (your contact address for LE expiry warnings)
-- Leave `providers.active: null` — goal 1 ships provider-less.
+
+There's no provider config in this file — Hermes manages providers
+natively via the dashboard or `hermes auth`. Goal 1 ships with no
+provider configured at all.
 
 `cluster.config.yaml` is gitignored. It never enters version control.
 

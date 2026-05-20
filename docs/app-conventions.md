@@ -128,14 +128,17 @@ resources). For now, app namespaces mint their own `Certificate` against
 the shared `ClusterIssuer/letsencrypt-prod` — one extra manifest per
 app, costs nothing.
 
-## SKILL.md
+## SKILL.md (Hermes-native — atrium just recommends conventions)
 
-Every app that exposes MCP tools ships a `SKILL.md` describing them.
-Place it at `deploy/k8s/skill-md/<app>.SKILL.md` in the app's repo.
-The backend serves its content at `/.well-known/agent-skill` for
-discovery.
+Every app that exposes MCP tools ships a `SKILL.md`. The schema is
+Hermes-native — the same one `hermes skills install` reads. Atrium
+adds no fields. Place the file at `deploy/k8s/skill-md/<app>.SKILL.md`
+in the app's repo, and serve its content at
+`/.well-known/agent-skill` from the backend so `hermes skills install
+https://api.<app>.<domain>` finds it (this is one of Hermes' six
+built-in install sources — see `hermes skills install --help`).
 
-### Recommended frontmatter
+### Recommended frontmatter (mirrors Hermes' schema)
 
 ```yaml
 ---
@@ -159,10 +162,10 @@ they encode behavior the agent or atrium tooling will act on. Hermes
 treats unknown frontmatter as opaque — fields that nothing reads are
 dead weight.
 
-### Body sections
+### Body sections (Hermes-canonical)
 
-Hermes' planner expects these canonical sections; matching them
-improves how the skill gets surfaced:
+Hermes' planner looks for these section headers; matching them improves
+how the skill gets surfaced:
 
 - `## When to Use` — trigger conditions. Be specific. Verb phrases.
 - `## Procedure` — what to do, in order. Tool surface table belongs here.
@@ -178,20 +181,24 @@ break the moment somebody installs the same SKILL.md on a different
 Hermes (a vanilla one, a different distro, a hosted service). Stick to
 **what the app does**, **when to call it**, **what tools to use**.
 
-## Skill discovery + install
+## Skill discovery + install (Hermes-native)
 
 Apps publish their SKILL.md at `https://${APP_BE_HOSTNAME}.${CLUSTER_DOMAIN}/.well-known/agent-skill`.
-Hermes installs from that URL:
+**Hermes ships the install motion** — atrium doesn't write any
+discovery code. The operator runs:
 
 ```bash
 kubectl -n hermes exec deploy/hermes -c dashboard -- \
   /opt/hermes/.venv/bin/hermes skills install https://api.<app>.<domain>
 ```
 
-This uses Hermes' native install flow — no atrium-specific glue, no
-ConfigMap shenanigans, no init container. The skill lands on Hermes'
-PVC under `~/.hermes/skills/`. Update by running the same command;
-remove with `hermes skills uninstall <name>`.
+`well-known` is one of Hermes' six install sources (alongside
+`official`, `skills-sh`, `github`, `clawhub`, `claude-marketplace`).
+Skill lands on the PVC under `~/.hermes/skills/`. Update by running the
+same command; remove with `hermes skills uninstall <name>`. Bundle
+multiple installed skills under one `/<bundle>` slash command with
+`hermes bundles create`. None of this is atrium code — atrium just
+ensures your app exposes the well-known endpoint correctly.
 
 ## What the bridge script does
 

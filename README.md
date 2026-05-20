@@ -1,20 +1,21 @@
 # atrium
 
-A **distribution of [Hermes](https://hermes-agent.nousresearch.com/)** —
-Ubuntu to Hermes' Linux kernel. The agent harness is upstream; atrium
-curates an opinionated bundle on top: an opinionated deploy substrate
-(k3s + Tailscale + cert-manager today), an extended skill contract that
-makes third-party apps cleanly callable, an install motion for those
-apps, and a stance on auth/trust between user, agent, and apps.
+The operational layer for self-hosting [Hermes](https://hermes-agent.nousresearch.com/).
+Hermes ships the runtime — model providers, OAuth, skills, channels,
+the dashboard control plane. **Atrium ships the substrate**: an
+opinionated deploy (k3s + Tailscale + cert-manager today), conventions
+for hosting operator-authored apps alongside Hermes, and a one-script
+install motion.
 
-The platform thesis: **the user pays one model provider once;
-SaaS apps don't run AI for their users — they expose a contract that any
-agent harness can call.** Atrium's job is making sure that contract is
-real, the harness has a place to run, and the install motion is sane.
+The platform thesis the substrate enables: **the user pays one model
+provider once; SaaS apps don't run AI for their users — they expose a
+contract that any agent harness can call.** Hermes implements the
+contract (`hermes skills install <url>` against `.well-known/agent-skill`,
+plus five other registries). Atrium just makes sure the harness has a
+real place to live.
 
 Clone, fill in `cluster.config.yaml`, run `./scripts/apply.sh` against a
 fresh k3s host — you end up with a Hermes dashboard reachable at
-`https://hermes.<your-domain>` over a private mesh. The full design,
-the install runbook, the substrate seams, and the contract spec live in
-[`docs/architecture.md`](docs/architecture.md). One file. Read it top
-to bottom.
+`https://hermes.<your-domain>` over a private mesh. Everything else
+([`docs/architecture.md`](docs/architecture.md)) is one file. Read it
+top to bottom.
