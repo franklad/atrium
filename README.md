@@ -1,13 +1,20 @@
 # atrium
 
-An agentic-OS platform. Kubernetes is the kernel,
-[Hermes](https://hermes-agent.nousresearch.com/) is the shell, apps are MCP
-"skills" that ship a `SKILL.md`. Single-tenant, tailnet-only, single-node.
-Provider-agnostic by construction — the platform boots without any model
-provider; Anthropic (API key or OAuth), OpenRouter, OpenAI, and any
-OpenAI-compatible endpoint all plug into the same seam.
+A **distribution of [Hermes](https://hermes-agent.nousresearch.com/)** —
+Ubuntu to Hermes' Linux kernel. The agent harness is upstream; atrium
+curates an opinionated bundle on top: an opinionated deploy substrate
+(k3s + Tailscale + cert-manager today), an extended skill contract that
+makes third-party apps cleanly callable, an install motion for those
+apps, and a stance on auth/trust between user, agent, and apps.
 
-Clone, fill in `cluster.config.yaml`, run the bootstrap procedure — you end
-up with a Hermes-fronted cluster reachable over Tailscale. The full design,
-the install runbook, and the seams for what comes after live in
-[`docs/architecture.md`](docs/architecture.md). One file. Read it top to bottom.
+The platform thesis: **the user pays one model provider once;
+SaaS apps don't run AI for their users — they expose a contract that any
+agent harness can call.** Atrium's job is making sure that contract is
+real, the harness has a place to run, and the install motion is sane.
+
+Clone, fill in `cluster.config.yaml`, run `./scripts/apply.sh` against a
+fresh k3s host — you end up with a Hermes dashboard reachable at
+`https://hermes.<your-domain>` over a private mesh. The full design,
+the install runbook, the substrate seams, and the contract spec live in
+[`docs/architecture.md`](docs/architecture.md). One file. Read it top
+to bottom.

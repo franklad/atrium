@@ -1,52 +1,115 @@
 # Atrium — design
 
-**Atrium is an agentic-OS platform.** A single repo you clone onto a fresh
-host, run one procedure against, and end up with a Kubernetes cluster running
-the [Hermes](https://hermes-agent.nousresearch.com/) agent on a tailnet,
-ready to grow apps. Kubernetes is the kernel, Hermes is the shell, apps are
-MCP "skills" that ship a `SKILL.md`. Single-node, single-tenant, tailnet-only.
+**Atrium is a distribution of [Hermes](https://hermes-agent.nousresearch.com/).**
+Ubuntu to Hermes' Linux kernel. Hermes is the agent harness — model
+routing, OAuth, channels, plugins, skills, the dashboard control plane.
+Atrium curates an opinionated bundle on top: a deploy substrate (k3s +
+Tailscale + cert-manager today; lighter substrates planned), an extended
+skill contract that makes third-party apps cleanly callable, an install
+motion for those apps, and a stance on auth/trust between user, agent,
+and apps.
 
-This is the spine. It says what atrium *is*, what it contains, why the shape
-is what it is, and exactly how to install it. One file. Read it top to
-bottom.
+This is the spine. It says what atrium *is*, what it contains, why the
+shape is what it is, and exactly how to install it. One file. Read it
+top to bottom.
 
-If you only read three sections, read **[Provider abstraction](#4-provider-abstraction)**,
-**[Goal 1](#5-goal-1-what-were-shipping)**, and **[Bootstrap runbook](#6-bootstrap-runbook)**.
-
----
-
-## 1. What atrium is
-
-A desktop OS, inverted.
-
-A desktop OS gives a human a window manager and apps. **Atrium gives an
-agent a cluster and skills.** The kernel (k3s) does isolation and
-scheduling. The shell (Hermes) is the agent loop. Apps are MCP servers
-exposing tools via `SKILL.md` manifests. The "user" is the operator reaching
-in from the tailnet.
-
-Three properties hold the platform together:
-
-1. **One repo, one install motion.** Cluster wiring, the Hermes deploy, and
-   platform contracts live in one tree. Per-app repos stay separate and
-   register through one Flux pointer each.
-2. **Configurable, not personal.** Everything host-specific — domain, node
-   name, GitHub owner, mesh name, age recipient, active model provider —
-   lives in a single `cluster.config.yaml` gitignored at the repo root.
-   A stranger cloning atrium sees a platform, not someone else's snapshot.
-3. **Provider-free at goal 1.** Atrium's first slice is Hermes + dashboard
-   on a private mesh with **no model provider configured at all** —
-   proving the platform is real before committing to a provider or auth
-   flow.
-
-The thesis: agent harness as kernel surface, MCP as the syscall ABI, apps
-as skilled clients. The platform stays neutral about *which* agent runs
-and *which* model provider feeds it. Today that's Hermes; tomorrow it could
-be anything that speaks MCP and reads a `config.yaml`.
+If you only read three sections, read **[What atrium adds above Hermes](#1-5-what-atrium-adds-above-hermes)**,
+**[Provider abstraction](#4-provider-abstraction)**, and **[Bootstrap runbook](#6-bootstrap-runbook)**.
 
 ---
 
-## 2. Topology (goal-1 state)
+## 1. The platform thesis
+
+The "agentic OS" is the runtime where **client-side apps live such that an
+agent can dispatch to them and a user can reach them directly.** A
+desktop OS gives a human a window manager and apps. **Atrium gives an
+agent (and through it, the user) a fleet of callable apps.**
+
+The division of labor that makes it work:
+
+| Layer | Who owns it | What they bring |
+|---|---|---|
+| **Model** | Model providers (Anthropic, OpenAI, OpenRouter, local…) | The brain. Tokens. |
+| **Harness** | Agent runtimes (Hermes, others) | The shell. Planning. Tool dispatch. Channel adapters. Cron. Sessions. |
+| **Apps** | Third parties (Spotify, Airbnb…) and the operator (local CLIs, custom tools) | A capability and a contract. **Not AI.** |
+| **Distribution** | Atrium | Substrate, contract layer, install UX, opinions, brand |
+
+The non-obvious point: **SaaS apps don't run AI.** They expose a contract
+that any agent harness can call. The user pays one model provider once
+(via their harness), and that one subscription animates every app they
+install. Spotify shouldn't ship a chat UI with their own LLM; they
+should ship a manifest that any agent can read and act on.
+
+This unblocks composition:
+
+```
+User: "extract the artist from this album cover and queue their top tracks"
+  → Hermes
+    → local image-parser app  (operator's laptop)        → "Pink Floyd"
+    → Spotify app             (Spotify's infrastructure) → spotify:artist:...
+    → Spotify app             → queue updated
+  → Hermes → User: "queued."
+```
+
+Three apps. Two clouds (or one cloud + one laptop). One agent. One model
+subscription. Zero coordination between Spotify and the image parser.
+That's the platform.
+
+Three properties hold the distribution together:
+
+1. **One repo, one install motion** for the operator's substrate. Cluster
+   wiring, the Hermes deploy, and the contract layer live in one tree.
+2. **Configurable, not personal.** Everything host-specific lives in a
+   single `cluster.config.yaml` gitignored at the repo root. A stranger
+   cloning atrium sees a platform, not someone else's snapshot.
+3. **Provider-free at goal 1.** Atrium boots Hermes + dashboard on a
+   private mesh with **no model provider configured** — proving the
+   platform is real before committing to a provider or auth flow.
+
+The platform stays neutral about *which* agent runs and *which* model
+provider feeds it. Today that's Hermes; the contract is portable to
+anything that speaks MCP and reads a `config.yaml`.
+
+---
+
+## 1.5. What atrium adds above Hermes
+
+Hermes is already most of the runtime. The dashboard's `/api/*` surface
+exposes config, models, providers, keys, plugins, skills, profiles,
+cron, sessions, auth, and the channel gateway — every Hermes
+functionality is programmable, not just viewable. Atrium does not
+duplicate any of that.
+
+What atrium adds, by category:
+
+| Layer | Hermes-native | Atrium adds |
+|---|---|---|
+| **Skill contract** | `SKILL.md` with name/description/triggers — instruction-flavored | Extended SKILL.md with OAuth flow spec, capability semantics, trust class, UI hint, versioning — service-contract-flavored. See `docs/skill-contract.md` (forthcoming). |
+| **Skill discovery** | Filesystem rglob over `~/.hermes/skills/` | A convention for public skill manifests (`/.well-known/agent-skill.json` on the app's domain), so a user can `atrium install <url>` for any third-party app |
+| **App auth** | API-key + OAuth flows *for model providers* | OAuth orchestration *for apps* (Spotify, Google, etc.) with per-skill trust profiles |
+| **Substrate** | None — Hermes is a binary/image; where it runs is the operator's problem | Opinionated deployments: k3s+Tailscale+cert-manager today; docker-compose planned; native-systemd planned |
+| **First-party app runtime** | None — Hermes calls remote MCP endpoints, doesn't host them | A place to run the operator's own apps (gustus/pantry-shaped) alongside Hermes, with shared infra (Postgres, certs, ingress) |
+| **Curated defaults** | Neutral on channels/plugins/SOUL | An opinionated default `SOUL.md`, default channel set, default plugin posture, default secret-management (SOPS+age) |
+
+The split is intentional: anything that benefits every Hermes user
+(richer SKILL.md fields, OAuth orchestration primitives) gets proposed
+upstream once proven in atrium. Anything that's an *opinion* (this
+particular substrate, this particular default voice, this particular
+trust model) stays in atrium where opinions are welcome.
+
+Atrium does not fork Hermes. It depends on Hermes upstream and
+contributes back. The relationship is the same as Ubuntu's to the
+Linux kernel.
+
+---
+
+## 2. Topology (goal-1 state, k3s substrate)
+
+This section describes the **k3s + Tailscale + cert-manager substrate** —
+atrium's first opinionated deployment, currently the only one. Other
+substrates (docker-compose, native systemd) will live as peers under
+`deploy/` and follow the same principles below; only the realization
+changes.
 
 Atrium is **private-mesh-first**: ingress lives on a single-tenant overlay
 network, not on the public internet. The principle is *no public
@@ -820,59 +883,40 @@ and rerun §6.4.
 
 ---
 
-## 7. Goal 1.5: Dashboard-config discovery
+## 7. Hermes is the control plane (goal-1.5 outcome)
 
-**A named milestone between goal 1 and goal 2.** Single owner: the operator.
-Single deliverable: a decision on goal-2's provider-wiring shape.
+The dashboard isn't just a viewer — it's a **programmable control plane**.
+Every Hermes capability has a corresponding `/api/*` endpoint with the
+same access model the dashboard uses (session bearer):
 
-### Why this milestone exists
+```
+/api/config       /api/models       /api/providers    /api/keys
+/api/plugins      /api/skills       /api/profiles     /api/auth
+/api/sessions     /api/cron         /api/gateway      /api/system
+/api/agents       /api/dashboard    /api/version      /api/health
+```
 
-The Hermes upstream docs (read at time of writing) describe configuration
-exclusively as CLI- and config-file-driven: `hermes config edit`,
-`hermes model`, `~/.hermes/config.yaml`, `~/.hermes/.env`,
-`~/.hermes/auth.json`. The docs do not mention a settings UI inside the
-dashboard.
+All confirmed reachable (returned `200`) against a goal-1 install with
+the SPA's session token. Implications for the rest of atrium:
 
-But: the operator has hands-on familiarity with the dashboard and suspects
-it may expose provider/model configuration in-app. The docs may lag the
-build. Confirming or refuting this is a goal-1.5 task, not a goal-1
-blocker.
+- **Goal-2 provider wiring is dashboard- and API-driven**, not
+  config-file-driven. Atrium's `deploy/hermes/20-config.yaml` is the
+  *initial seed* of Hermes' on-disk `config.yaml`; once Hermes boots,
+  the dashboard owns mutations. The ConfigMap is read on first boot
+  (via `cp -n`) and not reconciled after that.
+- **`cluster.config.yaml.providers.*` is for operators who prefer
+  declarative-everything**, not the canonical path. The default
+  goal-2 motion is: log into the dashboard, paste credentials, done.
+- **App install motion targets `/api/skills`**. Atrium's future
+  `atrium install <skill-url>` CLI fetches a SKILL.md, runs any OAuth
+  flow the manifest declares, then POSTs to Hermes' `/api/skills`.
+  No k8s manifest changes; no pod restarts; live registration.
 
-### Inputs
-
-- A running goal-1 cluster (this doc, §5–§6).
-- Operator time at the dashboard, ~30–60 minutes.
-
-### Tasks
-
-1. Open the dashboard at `https://hermes.<tailnet>.ts.net`.
-2. Click every tab. Note which surface configuration: settings, preferences,
-   model selector, provider configuration, integrations, API keys.
-3. For each settings surface, note:
-   - What it can set (model name, provider, API key, OAuth token, base URL).
-   - Where it persists (Hermes' PVC? In-memory? An API the dashboard exposes?).
-   - Whether a config-file write happens on the back end (compare
-     `kubectl -n hermes exec deploy/hermes -- cat /opt/data/config.yaml`
-     before and after a UI change).
-4. Decide: at goal 2, where does provider+auth configuration live?
-   - (a) Only in `cluster.config.yaml` / `hermes-env` Secret / ConfigMap.
-   - (b) Only in the dashboard (atrium ships minimal seeds).
-   - (c) Both: atrium seeds, dashboard overrides for ad-hoc tweaks.
-5. Record the decision in this doc (replace §7 with the outcome) and move
-   to goal 2.
-
-### Success criteria
-
-- A written list of every dashboard surface that touches configuration.
-- A documented choice between (a), (b), (c) above with a one-paragraph
-  rationale.
-- An updated §4 (Provider abstraction) reflecting the chosen mechanism.
-
-### Why this isn't goal 2
-
-Picking the wrong wiring mechanism is a one-month rework. Goal 1 ships the
-platform; goal 1.5 informs the goal-2 design before any code lands.
-**Twenty minutes of dashboard exploration saves a week of rebuild.**
+The `metadata.atrium.*` extensions to SKILL.md (OAuth flow, trust
+class, capability semantics) are precisely the fields the install
+motion reads. The contract lives in `docs/skill-contract.md`
+(forthcoming); §4 of this document describes the provider seam that
+hangs off it.
 
 ---
 
@@ -883,7 +927,12 @@ choices don't paint goal-2 work into a corner.
 
 | Future capability | Seam | Notes |
 |---|---|---|
-| **Model provider** (after goal 1.5) | `cluster.config.yaml.providers.<active>` block + `hermes-env` Secret + ConfigMap `model:` block. Mechanism (config-file vs dashboard vs both) TBD by goal 1.5. | The Deployment already does `envFrom: hermes-env` with `optional: true`. No manifest changes. |
+| **Model provider** (goal-1.5 resolved → dashboard/API) | Operator configures providers via the Hermes dashboard or `/api/providers`/`/api/keys`. Atrium's role is shipping a sensible empty seed (`deploy/hermes/20-config.yaml`) and not getting in the way. `cluster.config.yaml.providers.*` is the optional declarative path for operators who want everything in git. | Deployment already does `envFrom: hermes-env` with `optional: true`. No manifest changes when a provider is added; just a Secret + a dashboard config. |
+| **Extended SKILL.md contract** | `docs/skill-contract.md` (forthcoming) specs the `metadata.atrium.*` fields: OAuth flow, capability semantics, trust class, UI hint, versioning. Hermes reads these as opaque frontmatter today; atrium tooling interprets them. Reference designs: a SaaS app (Spotify-style) and a local CLI tool. | This is atrium's unique value above Hermes — see §1.5. Mature fields get proposed upstream. |
+| **App install motion** | `atrium install <skill-url>` CLI: fetches the SKILL.md, runs any OAuth flow it declares, POSTs to Hermes' `/api/skills`. Companion to a `/.well-known/agent-skill.json` convention for public skill manifests. | Maps to Hermes' existing `/api/skills` programmatic surface (confirmed §7). No Hermes changes needed for v1. |
+| **Public skill discovery** | A loose convention: app authors publish their SKILL.md at `https://<their-domain>/.well-known/agent-skill.json` so any harness's install tooling can pick it up. Like `robots.txt` but for agent skills. | The convention only needs adoption by app authors. Atrium's tooling reads it; Hermes upstream could too. |
+| **Alternative substrates** | `deploy/docker-compose/` for single-host without k3s; `deploy/native/` for systemd units on the operator's machine. Same `cluster.config.yaml` schema; the substrate is the part that changes. | The k3s+Tailscale substrate (`deploy/platform/` + `deploy/hermes/`) is one opinion. Lighter substrates reduce the operational floor for new operators. |
+| **Upstream contributions** | Promote `metadata.atrium.*` fields, OAuth orchestration primitives, and install-motion patterns into Hermes proper once validated. | Atrium stays the *distribution* — opinions, defaults, substrate. The contract layer dissolves into Hermes upstream over time, the way GNU/Linux conventions become POSIX. |
 | **Flux GitOps** | `platform/clusters/default/` Flux root, `platform/apps/<app>.yaml` pointers per app, `platform/infrastructure/` for shared resources. `flux bootstrap github --owner ... --repo atrium --path platform/clusters/default`. Existing `deploy/platform/` + `deploy/hermes/` move under `platform/`. | Adds source/kustomize/helm/notification controllers + (optional) image-reflector/image-automation. Flux's `postBuild.substituteFrom` replaces `scripts/apply.sh` for the templating dance. |
 | **SOPS-encrypted Secrets in git** | Encrypt provider Secrets, Cloudflare token, etc. with the age key pre-seeded in `flux-system/sops-age` (§6.6). Flux's kustomize-controller decrypts on apply. | Today: Secrets are created out-of-band (kubectl create + tempfile). Goal 2 brings them into git. |
 | **Image automation** | `--components-extra=image-reflector-controller,image-automation-controller` on `flux bootstrap`. Per-app `ImageRepository`/`ImagePolicy`/`ImageUpdateAutomation`. Tag scheme `<unix-ts>-sha-<git-sha>` + a `$imagepolicy` marker comment on each `image:` line. | Today: manual SHA bump in `deploy/hermes/40-deployment.yaml`. |
