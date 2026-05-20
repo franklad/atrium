@@ -27,34 +27,108 @@ backend and a frontend, but the **shape stays the same**: backend at
 `api.<app>.<your-domain>`, frontend at `<app>.<your-domain>`, skill
 manifest served from the backend.
 
-## Required shape
+## Deployment shapes
 
-### Namespaces
+Atrium's role varies by where the app's backend lives. Four shapes; the
+app's deploy bundle reflects which one applies.
 
-| Namespace | Hosts | Notes |
-|---|---|---|
-| `<app>-be` | Backend (API + MCP + per-app data store) | The "SaaS-shaped" half. Stays put even if the frontend gets replaced. |
-| `<app>-fe` | Frontend (SPA, Next.js, static site, whatever) | The "consumer app" half. Optional — apps without a UI (CLI-shaped tools, headless integrations) skip this. |
+### Shape A — Pure third-party (atrium hosts nothing)
 
-Apps may use a single `<app>` namespace if they don't need the tier
-split (e.g. a CLI-shaped tool with no frontend). Skip `<app>-fe` in
-that case; keep `<app>-be` for consistency with the SaaS-shaped pattern.
+The provider runs everything. The operator just registers the skill
+with their Hermes:
+
+```
+operator → hermes auth spotify     # or hermes auth add <provider>
+operator → hermes skills install https://<provider-domain>
+```
+
+No atrium-side YAML. No `apply-app.sh`. The app's repo doesn't even
+need to exist on the operator's machine. **This is the common case for
+real SaaS** — Spotify, GitHub, Linear, etc. Hermes ships native auth
+flows for several providers (`hermes auth --help`).
+
+### Shape B — Third-party backend, operator hosts the frontend
+
+The provider runs the API + holds the data (api.airbnb.com style). The
+operator self-hosts a frontend skin that talks to it. Atrium hosts
+**only the frontend**.
+
+```
+Namespaces:   <app>-fe   (no <app>-be — backend is provider-owned)
+Hostnames:    <app>.<your-domain>          → frontend in <app>-fe
+              api.<provider-domain>        → not yours; not in atrium
+Skill manifest source: provider's own /.well-known/agent-skill on their domain
+```
+
+The frontend's job is to be a polished UI in front of the provider's
+API + their OAuth. The MCP endpoint Hermes calls is the provider's, not
+yours.
+
+### Shape C — In-house monolith (single image, single namespace)
+
+The operator built the app; it serves SPA + API + MCP from one process.
+Atrium hosts the whole thing in one namespace.
+
+```
+Namespaces:   <app>     (no split)
+Hostnames:    <app>.<your-domain>          → the one Service
+              <app>.<your-domain>/api/*    → same Service, API routes
+              <app>.<your-domain>/mcp      → same Service, MCP route
+              <app>.<your-domain>/.well-known/agent-skill → same
+```
+
+This is the simplest shape and what most early in-house apps look like.
+Gustus today is exactly this — Fastify with `SERVE_STATIC=true`.
+
+### Shape D — In-house with backend/frontend split
+
+The operator built the app and chose to split tiers — separate deploy
+cadence for the UI, separate scaling, optional CORS-honest API
+boundary. Atrium hosts both halves in separate namespaces.
+
+```
+Namespaces:   <app>-be   <app>-fe
+Hostnames:    <app>.<your-domain>          → frontend in <app>-fe
+              api.<app>.<your-domain>      → backend in <app>-be
+              api.<app>.<your-domain>/mcp  → backend's MCP route
+              api.<app>.<your-domain>/.well-known/agent-skill → backend
+```
+
+Backend needs CORS to allow the frontend origin. This is the shape that
+mirrors a "real SaaS" pattern (api.* + the consumer-facing app).
+
+### Which shape to pick
+
+| Situation | Shape |
+|---|---|
+| Real third-party SaaS (Spotify, GitHub, …) | A — Hermes alone |
+| Self-host a UI skin for a third-party API | B — frontend only |
+| Building a new in-house app, simple | C — monolith |
+| Building a new in-house app, want tier separation OR mirror a SaaS shape | D — split |
+
+Shapes C and D can convert into each other later. A→D would require
+the operator to take over the backend entirely (different problem).
+B→D similarly requires you to build a replacement for the third-party
+backend (possible but rare).
+
+### What goes where, summary
+
+| Resource | Shape A | Shape B | Shape C | Shape D |
+|---|---|---|---|---|
+| `<app>-be` namespace | — | — | — | yes |
+| `<app>-fe` namespace | — | yes | — | yes |
+| `<app>` namespace (single) | — | — | yes | — |
+| `apply-app.sh` runs | no | yes | yes | yes |
+| `hermes skills install` runs | yes | yes (against provider) | yes (against `<app>.<domain>`) | yes (against `api.<app>.<domain>`) |
 
 Apps **must not** deploy anything into the `hermes` namespace. That
 namespace is reserved for the agent.
 
 ### Hostnames
 
-| Surface | Hostname | Served by |
-|---|---|---|
-| Frontend | `${APP_FE_HOSTNAME}.${CLUSTER_DOMAIN}` (default: `<app>.<domain>`) | `<app>-fe/Service` via Traefik Ingress |
-| Backend API + MCP | `${APP_BE_HOSTNAME}.${CLUSTER_DOMAIN}` (default: `api.<app>.<domain>`) | `<app>-be/Service` via Traefik Ingress |
-| Skill manifest | `${APP_BE_HOSTNAME}.${CLUSTER_DOMAIN}/.well-known/agent-skill` | Same backend, dedicated route |
-| MCP endpoint | `${APP_BE_HOSTNAME}.${CLUSTER_DOMAIN}/mcp` | Same backend, dedicated route |
-
-Both hostnames must have a public DNS A record pointing at the node's
-mesh IP. The wildcard cert (`*.<CLUSTER_DOMAIN>`) covers both — no
-per-app cert work.
+Public DNS A records point at the node's mesh IP. The wildcard cert
+(`*.<CLUSTER_DOMAIN>`) covers every `<anything>.<CLUSTER_DOMAIN>` host
+the app uses — no per-app cert work.
 
 The MCP endpoint **is publicly reachable** (gated by bearer auth at the
 app's discretion). This is intentional: the same shape works whether
@@ -64,17 +138,25 @@ implementation detail apps shouldn't rely on.
 
 ### Env vars atrium provides
 
-The bridge script (`scripts/apply-app.sh`) renders the app's bundle via
-`envsubst`. These variables are populated from `cluster.config.yaml`
-and the app's identity:
+The bridge script (`scripts/apply-app.sh`) exports these via `envsubst`
+when rendering the app's bundle. Apps use **whichever ones their shape
+needs** — unused env vars are harmless.
 
-| Variable | Value | Source |
+| Variable | Value | Used by shape |
 |---|---|---|
-| `CLUSTER_DOMAIN` | The atrium operator's domain (e.g. `example.com`) | `cluster.config.yaml.cluster.domain` |
-| `ACME_EMAIL` | LE contact email | `cluster.config.yaml.acme.email` |
-| `APP_NAME` | The app's identifier (lowercase, kebab) | `apply-app.sh` arg |
-| `APP_FE_HOSTNAME` | Frontend hostname *prefix* (default: `${APP_NAME}`) | Convention; override in `cluster.config.yaml.apps.<app>.fe_hostname` |
-| `APP_BE_HOSTNAME` | Backend hostname *prefix* (default: `api.${APP_NAME}`) | Convention; override in `cluster.config.yaml.apps.<app>.be_hostname` |
+| `CLUSTER_DOMAIN` | The atrium operator's domain (e.g. `example.com`) | B, C, D |
+| `ACME_EMAIL` | LE contact email | (rarely; cert-manager owns it) |
+| `APP_NAME` | The app's identifier (lowercase, kebab) | B, C, D |
+| `APP_FE_HOSTNAME` | Frontend hostname *prefix* (default: `${APP_NAME}`) | B, D (and C if the app wants the symbolic name) |
+| `APP_BE_HOSTNAME` | Backend hostname *prefix* (default: `api.${APP_NAME}`) | D only |
+
+All defaults can be overridden in `cluster.config.yaml.apps.<app>.{fe,be}_hostname`.
+
+App manifests reference these with shell-style placeholders
+(`${APP_FE_HOSTNAME}.${CLUSTER_DOMAIN}`) — not Helm-style or Flux
+postBuild — because envsubst is the chosen rendering layer. When
+goal-2 Flux lands, the same placeholders work natively via
+`Kustomization.spec.postBuild.substituteFrom`.
 
 The app's manifests reference these with shell-style placeholders
 (`${APP_FE_HOSTNAME}.${CLUSTER_DOMAIN}`) — *not* Helm-style or Flux
@@ -219,21 +301,21 @@ applies it on every reconcile.
 
 ## Conventions checklist
 
-For an app author asking "is my app atrium-shape-compliant":
+For an app author asking "is my app atrium-shape-compliant" — items
+apply per the deployment shape (A/B/C/D above):
 
-- [ ] Repo contains `deploy/k8s/kustomization.yaml` with the full bundle
-- [ ] Namespaces are `<app>-be` (+ `<app>-fe` if there's a UI)
+- [ ] **(B/C/D)** Repo contains `deploy/k8s/kustomization.yaml` with the full bundle
+- [ ] Namespaces match the shape: `<app>` for C, `<app>-fe` for B, `<app>-be`+`<app>-fe` for D
 - [ ] No resources in the `hermes` namespace
-- [ ] Hostnames use `${APP_FE_HOSTNAME}.${CLUSTER_DOMAIN}` and
-      `${APP_BE_HOSTNAME}.${CLUSTER_DOMAIN}` placeholders
+- [ ] Hostnames use the right env vars per shape: `${APP_FE_HOSTNAME}.${CLUSTER_DOMAIN}` (B/C/D) and `${APP_BE_HOSTNAME}.${CLUSTER_DOMAIN}` (D only)
 - [ ] TLS via `wildcard-tls` Secret (mint a `Certificate` resource in
       each namespace against `ClusterIssuer/letsencrypt-prod`)
 - [ ] Labels include `app.kubernetes.io/{name,component,part-of}` with
       `part-of: atrium-app`
-- [ ] Backend serves `/.well-known/agent-skill` returning the SKILL.md
-      content (or pointing at it)
-- [ ] Backend serves `/mcp` as a streamable HTTP MCP endpoint
-- [ ] CORS configured to allow the frontend's origin (if FE + BE split)
+- [ ] **(C/D)** Backend serves `/.well-known/agent-skill` returning the SKILL.md
+      content. **(B)** Skill manifest lives on the *provider's* domain — not atrium's responsibility.
+- [ ] **(C/D)** Backend serves `/mcp` as a streamable HTTP MCP endpoint
+- [ ] **(D only)** CORS configured to allow the frontend's origin
 - [ ] SKILL.md is substrate-neutral: no references to atrium, k8s
       internals, or specific mesh implementations
 
