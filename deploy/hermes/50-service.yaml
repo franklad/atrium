@@ -1,0 +1,17 @@
+---
+# Cluster-internal Service for the dashboard. Mesh exposure happens
+# through the Ingress in 60-ingress.yaml — keeping the Service
+# tailscale-agnostic means swapping the mesh implementation later only
+# touches the Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hermes-dashboard
+  namespace: hermes
+spec:
+  selector:
+    app: hermes
+  ports:
+    - name: dashboard
+      port: 9119
+      targetPort: dashboard

@@ -1,0 +1,110 @@
+---
+# ServiceAccount for the bootstrap-home init container. No RBAC needed
+# in goal 1 — the skill auto-discovery init container is dropped (no
+# skill ConfigMaps yet). When apps land at goal 2, this gets a Role
+# granting `get,list` on ConfigMaps in the hermes namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hermes
+  namespace: hermes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hermes
+  namespace: hermes
+  labels:
+    app: hermes
+    app.kubernetes.io/part-of: atrium
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate    # PVC is RWO; one pod at a time.
+  selector:
+    matchLabels: { app: hermes }
+  template:
+    metadata:
+      labels:
+        app: hermes
+    spec:
+      serviceAccountName: hermes
+      automountServiceAccountToken: false
+      initContainers:
+        # Seed config.yaml and SOUL.md onto the writable PVC on first
+        # run. `cp -n` (no-clobber) preserves any in-pod modifications
+        # across restarts — once seeded, the PVC owns the file. To
+        # re-seed: delete the file on the PVC and rollout restart.
+        - name: bootstrap-home
+          image: busybox:1.37
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /opt/data
+              cp -n /etc/hermes-config/config.yaml /opt/data/config.yaml || true
+              cp -n /etc/hermes-soul/SOUL.md       /opt/data/SOUL.md       || true
+          volumeMounts:
+            - { name: data,          mountPath: /opt/data }
+            - { name: hermes-config, mountPath: /etc/hermes-config, readOnly: true }
+            - { name: hermes-soul,   mountPath: /etc/hermes-soul,   readOnly: true }
+      containers:
+        - name: dashboard
+          # Pinned to a recent main-branch sha tag. Bump manually by
+          # editing this line; goal-2 introduces Flux image automation.
+          image: docker.io/nousresearch/hermes-agent:sha-e2fd462ebe7dfd13663270b6f3dff6360d2ad297
+          imagePullPolicy: IfNotPresent
+          # Override the image default to run the dashboard only — no
+          # api_server, no platforms, no gateway. The dashboard serves
+          # a self-contained SPA backend and needs no provider.
+          # Absolute path because the venv bin dir isn't on $PATH in
+          # the upstream image.
+          # --host 0.0.0.0  : bind to all interfaces (Service routes here)
+          # --port 9119     : default; explicit for clarity
+          # --no-open       : no browser to auto-open inside a pod
+          # --insecure      : required by Hermes to allow non-localhost bind
+          command: ["/opt/hermes/.venv/bin/hermes"]
+          args:
+            - dashboard
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "9119"
+            - --no-open
+            - --insecure
+          env:
+            - { name: HERMES_HOME, value: "/opt/data" }
+          envFrom:
+            # Empty/absent at goal 1; provider env vars land here at
+            # goal 2. `optional: true` keeps the pod from blocking on
+            # the Secret's absence.
+            - secretRef:
+                name: hermes-env
+                optional: true
+          ports:
+            - { name: dashboard, containerPort: 9119 }
+          volumeMounts:
+            - { name: data, mountPath: /opt/data }
+          readinessProbe:
+            httpGet: { path: /, port: dashboard }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: dashboard }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hermes-data
+        - name: hermes-config
+          configMap:
+            name: hermes-config
+        - name: hermes-soul
+          configMap:
+            name: hermes-soul

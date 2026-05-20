@@ -1,0 +1,61 @@
+---
+# Provider-less Hermes config.yaml for goal 1.
+#
+# Mounted at /etc/hermes-config/config.yaml; the bootstrap-home init
+# container in 40-deployment.yaml copies it to /opt/data/config.yaml on
+# the PVC the FIRST time the pod starts (cp -n; subsequent restarts
+# don't clobber). To change this once live: edit the ConfigMap, delete
+# /opt/data/config.yaml on the PVC, rollout restart.
+#
+# What's absent on purpose (this is goal 1, provider-less):
+#   - model.* / auxiliary.* / fallback_model — no provider configured
+#   - platforms — only the dashboard runs (started via container
+#     command, not via gateway/platforms wiring)
+#   - mcp_servers — no apps wired yet
+#   - stt — no speech path yet
+#   - delegation — no subagent dispatch until apps land
+#
+# Provider blocks land here at goal 2 (or via the dashboard, if that
+# turns out to be the mechanism — see docs/architecture.md §4 + §7).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-config
+  namespace: hermes
+data:
+  config.yaml: |
+    terminal:
+      backend: local
+      cwd: .
+      timeout: 180
+    compression:
+      enabled: true
+      threshold: 0.5
+      target_ratio: 0.2
+      protect_last_n: 20
+      protect_first_n: 3
+    prompt_caching:
+      cache_ttl: 5m
+    memory:
+      memory_enabled: true
+      user_profile_enabled: true
+      memory_char_limit: 2200
+      user_char_limit: 1375
+    session_reset:
+      mode: both
+      idle_minutes: 1440
+      at_hour: 4
+    group_sessions_per_user: true
+    skills:
+      creation_nudge_interval: 15
+      external_dirs:
+      - /opt/skills-overlay
+    agent:
+      max_turns: 60
+      verbose: false
+      reasoning_effort: medium
+    display:
+      compact: false
+      tool_progress: all
+      streaming: true
+      skin: default

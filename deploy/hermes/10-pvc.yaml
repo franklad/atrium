@@ -1,0 +1,15 @@
+---
+# Hermes' home directory (~/.hermes/). Holds config.yaml, SOUL.md, the
+# sessions DB, skills, and auth.json after any OAuth flow. RWO is fine —
+# Hermes is single-replica by design.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermes-data
+  namespace: hermes
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi

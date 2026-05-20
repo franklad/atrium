@@ -1,0 +1,41 @@
+---
+# Hermes dashboard ingress.
+#
+# Traffic path:
+#   browser → DNS lookup `hermes.<cluster.domain>` (public) → node's
+#   private-mesh IP (e.g. tailnet CGNAT) → only reachable from mesh
+#   members → k3s Traefik on :443 → this Ingress → hermes-dashboard:9119
+#
+# DNS: a public A record `hermes.<cluster.domain> → <node.mesh_ip>` must
+# exist at your DNS provider (Cloudflare in the reference cluster). The
+# address is private-mesh-only routable, so the public DNS answer is
+# useless to non-members.
+#
+# TLS: wildcard cert for `*.<cluster.domain>` is issued by cert-manager
+# via the Cloudflare DNS-01 ClusterIssuer (see deploy/platform/). The
+# Secret `wildcard-tls` is in this namespace.
+#
+# Substitute `hermes.machinecity.net` with your `hermes.<cluster.domain>`
+# at install time (the reference cluster uses machinecity.net).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hermes-dashboard
+  namespace: hermes
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - hermes.machinecity.net
+      secretName: wildcard-tls
+  rules:
+    - host: hermes.machinecity.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hermes-dashboard
+                port:
+                  number: 9119
