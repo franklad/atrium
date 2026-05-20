@@ -34,8 +34,9 @@ app's deploy bundle reflects which one applies.
 
 ### Shape A — Pure third-party (atrium hosts nothing)
 
-The provider runs everything. The operator just registers the skill
-with their Hermes:
+The provider runs everything — backend, frontend, the lot — and the
+user just reaches the provider's hosted product directly when they
+want a UI. The operator just registers the skill with their Hermes:
 
 ```
 operator → hermes auth spotify     # or hermes auth add <provider>
@@ -45,13 +46,23 @@ operator → hermes skills install https://<provider-domain>
 No atrium-side YAML. No `apply-app.sh`. The app's repo doesn't even
 need to exist on the operator's machine. **This is the common case for
 real SaaS** — Spotify, GitHub, Linear, etc. Hermes ships native auth
-flows for several providers (`hermes auth --help`).
+flows for several providers (`hermes auth --help`). If the provider
+later releases a self-hostable UI for atrium operators, the shape
+shifts to B.
 
-### Shape B — Third-party backend, operator hosts the frontend
+### Shape B — Third-party backend, operator-hosted frontend
 
 The provider runs the API + holds the data (api.airbnb.com style). The
-operator self-hosts a frontend skin that talks to it. Atrium hosts
-**only the frontend**.
+operator self-hosts a frontend that calls it. Atrium hosts **only the
+frontend**. Where the frontend artifact comes from can vary:
+
+- The operator wrote it (a custom UI tailored for atrium).
+- The provider publishes a downloadable image, kustomize bundle, or
+  Helm chart you pull and run as-is.
+- The provider publishes an SPA as static files (npm/CDN/git release)
+  and you serve them via nginx/caddy.
+
+All three variants land in atrium the same way:
 
 ```
 Namespaces:   <app>-fe   (no <app>-be — backend is provider-owned)
@@ -61,8 +72,9 @@ Skill manifest source: provider's own /.well-known/agent-skill on their domain
 ```
 
 The frontend's job is to be a polished UI in front of the provider's
-API + their OAuth. The MCP endpoint Hermes calls is the provider's, not
-yours.
+API + their OAuth. The MCP endpoint Hermes calls is the provider's,
+not yours. Atrium doesn't care whether the FE was written locally or
+pulled from a provider release; the deploy story is the same.
 
 ### Shape C — In-house monolith (single image, single namespace)
 
