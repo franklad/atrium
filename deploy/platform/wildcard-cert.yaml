@@ -1,0 +1,27 @@
+---
+# Wildcard certificate for *.<cluster.domain> (plus the apex). One cert
+# covers every app the cluster will serve under the configured domain.
+# Lives in the `hermes` namespace because that's where the Ingress
+# consumes it; future apps in other namespaces either reference this
+# secret cross-namespace via a tool like reflector OR mint their own
+# Certificate against the same ClusterIssuer.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-tls
+  namespace: hermes
+spec:
+  secretName: wildcard-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: ${CLUSTER_DOMAIN}
+  dnsNames:
+    - ${CLUSTER_DOMAIN}
+    - "*.${CLUSTER_DOMAIN}"
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  duration: 2160h        # 90 days
+  renewBefore: 360h      # renew at 15 days remaining

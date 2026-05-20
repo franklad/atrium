@@ -26,10 +26,10 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - hermes.machinecity.net
+        - ${HERMES_HOSTNAME}.${CLUSTER_DOMAIN}
       secretName: wildcard-tls
   rules:
-    - host: hermes.machinecity.net
+    - host: ${HERMES_HOSTNAME}.${CLUSTER_DOMAIN}
       http:
         paths:
           - path: /

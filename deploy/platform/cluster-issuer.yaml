@@ -1,0 +1,30 @@
+---
+# Let's Encrypt production issuer with Cloudflare DNS-01 validation.
+#
+# DNS-01 means cert-manager proves domain ownership by writing a TXT
+# record at `_acme-challenge.<cluster.domain>` — so the actual service
+# never needs to be publicly reachable (which is the point of atrium's
+# private-mesh thesis). The Cloudflare API token in the
+# `cloudflare-api-token` Secret needs scope `Zone:DNS:Edit` on the
+# cluster's domain zone.
+#
+# For first-time issuance against a new account, start with the staging
+# server URL below (commented) to avoid burning prod LE rate limits on
+# iteration. Flip to prod once issuance succeeds end-to-end.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    # server: https://acme-staging-v02.api.letsencrypt.org/directory   # staging
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${ACME_EMAIL}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
