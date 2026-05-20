@@ -1,0 +1,28 @@
+# Host-specific config — every operator's copy carries identity
+cluster.config.yaml
+
+# Age private keys never enter git (the public recipient is fine; the
+# private key lives at ~/.config/sops/age/keys.txt and is loaded into
+# the cluster by the bootstrap procedure)
+*.agekey
+keys.txt
+
+# SOPS-decrypted artifacts
+*.dec.yaml
+*.dec.yml
+
+# Kubeconfig copies
+kubeconfig
+*.kubeconfig
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*~
+
+# Build / runtime scratch
+/tmp/
+*.log

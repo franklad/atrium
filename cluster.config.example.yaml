@@ -1,0 +1,106 @@
+# cluster.config.example.yaml
+#
+# Template for the per-host config that drives an atrium install.
+# Copy this to `cluster.config.yaml` (which is gitignored) and fill in
+# your values. Atrium reads this file at install time; it is the only
+# host-specific surface.
+#
+#   cp cluster.config.example.yaml cluster.config.yaml
+#   $EDITOR cluster.config.yaml
+#
+# Everything in this file is per-cluster identity, not a secret in the
+# SOPS sense. Real secrets (provider keys, age private keys, OAuth
+# tokens) live in SOPS-encrypted Kubernetes Secrets — see §6 of
+# docs/architecture.md.
+
+cluster:
+  # A short, lowercase, DNS-safe name for this cluster. Used in
+  # kubeconfig context names and (later) Flux paths.
+  name: my-atrium
+
+  # The DNS domain the cluster will serve under once cert-manager and
+  # a real wildcard land at goal 2. Unused at goal 1 — the dashboard
+  # is reachable at <mesh>.ts.net (or your mesh equivalent).
+  domain: example.com
+
+  # Identity of the single node that runs k3s. Used as a --tls-san
+  # entry in the k3s install command.
+  node:
+    hostname: node-01           # e.g. the host's hostname
+    mesh_ip:  100.64.0.1        # the node's private-mesh IP (e.g. tailnet IP)
+    lan_ip:   192.168.1.10      # the node's LAN IP
+
+# Private-mesh ingress. Tailscale is the default implementation;
+# Headscale slots in identically. See §8 of docs/architecture.md.
+mesh:
+  kind: tailscale               # tailscale | headscale
+  # The MagicDNS suffix for your tailnet (e.g. tail<id>.ts.net).
+  # Find with: `tailscale status --json | jq -r '.MagicDNSSuffix'`
+  magic_dns_suffix: tailXXXXXX.ts.net
+  # Hostname the Tailscale Operator should mint for the Hermes
+  # dashboard Service. Combined with magic_dns_suffix this becomes the
+  # dashboard URL.
+  hermes_hostname: hermes
+
+# SOPS / age. The private key is NOT in this file — it lives at
+# ~/.config/sops/age/keys.txt on your workstation and is loaded into
+# the cluster's flux-system/sops-age Secret during bootstrap.
+age:
+  # The public recipient line from your age keypair (the line
+  # starting with `age1...`). Used by `sops` to encrypt secrets.
+  recipient: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Model provider. Goal 1 ships with `active: null` — Hermes boots
+# provider-less and the dashboard is reachable. Pick one of the
+# combinations below at goal 2 (or after, via the dashboard — see
+# §7 of docs/architecture.md).
+#
+# Every combination ships a `model:` block (rendered into Hermes'
+# config.yaml) and an `env:` map (rendered into the hermes-env
+# Secret). The platform itself stays neutral.
+providers:
+  active: null                  # null | anthropic-api | anthropic-oauth | openrouter | openai | local
+
+  # --- Anthropic, static API key ------------------------------------
+  # anthropic-api:
+  #   model:
+  #     provider: anthropic
+  #     model: claude-opus-4
+  #   env:
+  #     ANTHROPIC_API_KEY: <set via SOPS, do not paste plaintext here>
+
+  # --- Anthropic, OAuth (Claude.ai subscription) --------------------
+  # anthropic-oauth:
+  #   model:
+  #     provider: codex          # Hermes' Anthropic-OAuth slot
+  #     model: claude-opus-4
+  #   auth:
+  #     flow: oauth-browser      # one-time browser flow; token lands on PVC
+  #   env: {}                    # OAuth carries no static API key
+
+  # --- OpenRouter --------------------------------------------------
+  # openrouter:
+  #   model:
+  #     provider: openrouter
+  #     model: anthropic/claude-opus-4
+  #   env:
+  #     OPENROUTER_API_KEY: <set via SOPS>
+
+  # --- OpenAI ------------------------------------------------------
+  # openai:
+  #   model:
+  #     provider: openai
+  #     model: gpt-5
+  #   env:
+  #     OPENAI_API_KEY: <set via SOPS>
+
+  # --- Local / OpenAI-compatible (Ollama, vLLM, LM Studio, etc.) ---
+  # Any endpoint that speaks the OpenAI wire protocol drops in here
+  # by changing `base_url`.
+  # local:
+  #   model:
+  #     provider: openai
+  #     model: qwen2.5-coder:32b
+  #     base_url: http://ollama.ollama.svc.cluster.local:11434/v1
+  #     api_key: ollama          # placeholder; Ollama ignores it
+  #   env: {}
